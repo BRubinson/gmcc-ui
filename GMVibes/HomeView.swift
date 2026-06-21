@@ -15,6 +15,17 @@ struct HomeView: View {
                 }
                 .padding()
                 .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+
+                Text("Runtime (per-session)")
+                    .font(.headline)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(GMCCRuntimeEnvKey.allCases, id: \.self) { key in
+                        runtimeRow(key)
+                    }
+                }
+                .padding()
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+
                 Button("Refresh", systemImage: "arrow.clockwise") {
                     gmcc.refresh()
                 }
@@ -40,6 +51,20 @@ struct HomeView: View {
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 180, alignment: .leading)
             Text(gmcc[key] ?? "—")
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func runtimeRow(_ key: GMCCRuntimeEnvKey) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(key.rawValue)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 180, alignment: .leading)
+            Text(gmcc[runtime: key] ?? "—")
                 .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
             Spacer()

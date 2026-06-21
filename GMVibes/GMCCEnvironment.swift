@@ -2,18 +2,33 @@ import Foundation
 import Observation
 
 enum GMCCEnvKey: String, CaseIterable, Hashable {
-    case ckfsRoot      = "GMCC_CKFS_ROOT"
-    case kbite         = "GMCC_KBITE"
-    case kbiteDigested = "GMCC_KBITE_DIGESTED"
-    case kbiteOpen     = "GMCC_KBITE_OPEN"
+    case ckfsRoot       = "GMCC_CKFS_ROOT"
+    case kbite          = "GMCC_KBITE"
+    case kbiteDigested  = "GMCC_KBITE_DIGESTED"
+    case kbiteOpen      = "GMCC_KBITE_OPEN"
+    case projects       = "GMCC_PROJECTS"
+    case projectsIndex  = "GMCC_PROJECTS_INDEX"
+}
+
+// Runtime vars exported by detect_repo.sh on SessionStart (via $CLAUDE_ENV_FILE).
+// These are not persisted to ~/.zshrc — they're per-session and only visible
+// when the app is launched from a process that has them set.
+enum GMCCRuntimeEnvKey: String, CaseIterable, Hashable {
+    case booted       = "GMCC_BOOTED"
+    case pluginRoot   = "GMCC_PLUGIN_ROOT"
+    case projectPath  = "GMCC_PROJECT_PATH"
+    case instancePath = "GMCC_INSTANCE_PATH"
+    case sessionPath  = "GMCC_SESSION_PATH"
 }
 
 @Observable
 @MainActor
 final class GMCCEnvironment {
     private(set) var values: [GMCCEnvKey: String] = [:]
+    private(set) var runtimeValues: [GMCCRuntimeEnvKey: String] = [:]
 
     subscript(key: GMCCEnvKey) -> String? { values[key] }
+    subscript(runtime key: GMCCRuntimeEnvKey) -> String? { runtimeValues[key] }
 
     var isLoaded: Bool { values[.ckfsRoot] != nil }
 
@@ -23,6 +38,18 @@ final class GMCCEnvironment {
 
     func refresh() {
         values = Self.scanZshrc()
+        runtimeValues = Self.scanProcessEnvironment()
+    }
+
+    private static func scanProcessEnvironment() -> [GMCCRuntimeEnvKey: String] {
+        let env = ProcessInfo.processInfo.environment
+        var out: [GMCCRuntimeEnvKey: String] = [:]
+        for key in GMCCRuntimeEnvKey.allCases {
+            if let value = env[key.rawValue], !value.isEmpty {
+                out[key] = value
+            }
+        }
+        return out
     }
 
     private static func scanZshrc() -> [GMCCEnvKey: String] {
