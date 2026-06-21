@@ -69,7 +69,7 @@ mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 
-echo "==> Building $DMG_PATH…"
+echo "==> Building ${DMG_PATH}…"
 hdiutil create -volname "$APP_NAME" \
   -srcfolder "$STAGE" \
   -ov -format UDZO \
