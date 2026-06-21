@@ -3,6 +3,7 @@ import SwiftUI
 enum SidebarItem: String, Identifiable, CaseIterable, Hashable {
     case home
     case kbites
+    case yeetViewer
     case projects
 
     var id: String { rawValue }
@@ -11,6 +12,7 @@ enum SidebarItem: String, Identifiable, CaseIterable, Hashable {
         switch self {
         case .home: "Home"
         case .kbites: "Knowledge Bites"
+        case .yeetViewer: "Yeet Viewer"
         case .projects: "Projects"
         }
     }
@@ -19,6 +21,7 @@ enum SidebarItem: String, Identifiable, CaseIterable, Hashable {
         switch self {
         case .home: "house"
         case .kbites: "lightbulb"
+        case .yeetViewer: "doc.text.magnifyingglass"
         case .projects: "folder"
         }
     }
@@ -47,6 +50,7 @@ struct ContentView: View {
             switch selection {
             case .home: HomeView()
             case .kbites: KnowledgeBitesView()
+            case .yeetViewer: YeetViewerView()
             case .projects: ProjectsView()
             case .none:
                 Text("Select a section")
@@ -65,4 +69,5 @@ struct ContentView: View {
     ContentView()
         .environment(GMCCEnvironment())
         .environment(KBiteStore())
+        .environment(YeetViewerStore())
 }
