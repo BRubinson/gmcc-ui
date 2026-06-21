@@ -11,7 +11,7 @@ import Foundation
 // Anything outside this dialect is preserved as a string scalar — the viewer is
 // read-only and we only need to surface known top-level shapes.
 
-enum YeetLanguageEngine {
+nonisolated enum YeetLanguageEngine {
     static func parse(url: URL) throws -> YeetDocument {
         let text: String
         do {
@@ -23,15 +23,30 @@ enum YeetLanguageEngine {
     }
 
     static func parse(text: String) throws -> YeetDocument {
+        let root = try parseRawRoot(text: text)
+        let header = Self.buildHeader(from: root)
+        let sections = Self.buildSections(from: root["sections"])
+        return YeetDocument(header: header, sections: sections, sourceText: text)
+    }
+
+    // Generic-root entry. Used by runtime ckfs DTO decoders that walk arbitrary
+    // top-level keys (not just the YEETS schema header/sections).
+    static func parseRawRoot(text: String) throws -> [String: YeetYAML] {
         var parser = LineParser(text: text)
         guard case let .mapping(root) = try parser.parseNode(indent: 0) else {
             throw YeetParseError.invalidShape(line: 1, reason: "top-level must be a mapping")
         }
+        return root
+    }
 
-        let header = Self.buildHeader(from: root)
-        let sections = Self.buildSections(from: root["sections"])
-
-        return YeetDocument(header: header, sections: sections, sourceText: text)
+    static func parseRawRoot(url: URL) throws -> [String: YeetYAML] {
+        let text: String
+        do {
+            text = try String(contentsOf: url, encoding: .utf8)
+        } catch {
+            throw YeetParseError.readFailed(error.localizedDescription)
+        }
+        return try parseRawRoot(text: text)
     }
 
     // MARK: - Header
@@ -137,7 +152,7 @@ enum YeetLanguageEngine {
 
 // MARK: - YAML value type
 
-indirect enum YeetYAML: Equatable {
+nonisolated indirect enum YeetYAML: Equatable {
     case scalar(String)
     case mapping([String: YeetYAML])
     case sequence([YeetYAML])
@@ -152,7 +167,7 @@ indirect enum YeetYAML: Equatable {
 // We tag it on the dictionary via an associated reference object stored in a
 // `_orderedKeys_` slot kept by the parser. Swift dicts don't preserve order;
 // we sidecar the order list into a magic key that we strip on lookup.
-private extension Dictionary where Key == String, Value == YeetYAML {
+nonisolated private extension Dictionary where Key == String, Value == YeetYAML {
     var orderedKeys: [String]? {
         if case let .sequence(items)? = self["__yeet_ordered_keys__"] {
             return items.compactMap { $0.scalarString }
@@ -163,7 +178,7 @@ private extension Dictionary where Key == String, Value == YeetYAML {
 
 // MARK: - Line parser
 
-private struct LineParser {
+nonisolated private struct LineParser {
     let lines: [String]
     var cursor: Int = 0
 
