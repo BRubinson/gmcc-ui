@@ -1,32 +1,19 @@
-//
-//  GMVibesApp.swift
-//  GMVibes
-//
-//  Created by Bryce Rubinson on 6/12/26.
-//
-
 import SwiftUI
-import SwiftData
 
 @main
 struct GMVibesApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @State private var gmccEnvironment = GMCCEnvironment()
+    @State private var kbiteStore = KBiteStore()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(gmccEnvironment)
+                .environment(kbiteStore)
         }
-        .modelContainer(sharedModelContainer)
+
+        WindowGroup("KBite File", id: "kbite-md", for: URL.self) { $url in
+            KBiteMarkdownWindowView(url: url)
+        }
     }
 }

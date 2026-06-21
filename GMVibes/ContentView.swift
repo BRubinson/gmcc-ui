@@ -1,53 +1,61 @@
-//
-//  ContentView.swift
-//  GMVibes
-//
-//  Created by Bryce Rubinson on 6/12/26.
-//
-
 import SwiftUI
-import SwiftData
+
+enum SidebarItem: String, Identifiable, CaseIterable, Hashable {
+    case home
+    case kbites
+    case projects
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .home: "Home"
+        case .kbites: "Knowledge Bites"
+        case .projects: "Projects"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .home: "house"
+        case .kbites: "lightbulb"
+        case .projects: "folder"
+        }
+    }
+}
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @Environment(GMCCEnvironment.self) private var gmcc
+    @State private var selection: SidebarItem? = .home
+
+    private func isLocked(_ item: SidebarItem) -> Bool {
+        !gmcc.isLoaded && item != .home
+    }
 
     var body: some View {
         NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-                    }
+            List(SidebarItem.allCases, selection: $selection) { item in
+                NavigationLink(value: item) {
+                    Label(item.title, systemImage: item.systemImage)
                 }
-                .onDelete(perform: deleteItems)
+                .disabled(isLocked(item))
+                .selectionDisabled(isLocked(item))
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-            .toolbar {
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
-            }
+            .navigationTitle("GMVibes")
         } detail: {
-            Text("Select an item")
+            switch selection {
+            case .home: HomeView()
+            case .kbites: KnowledgeBitesView()
+            case .projects: ProjectsView()
+            case .none:
+                Text("Select a section")
+                    .foregroundStyle(.secondary)
+            }
         }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
+        .onChange(of: gmcc.isLoaded, initial: true) { _, _ in
+            if let current = selection, isLocked(current) {
+                selection = .home
             }
         }
     }
@@ -55,5 +63,6 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+        .environment(GMCCEnvironment())
+        .environment(KBiteStore())
 }
