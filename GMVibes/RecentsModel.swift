@@ -1,14 +1,26 @@
 import Foundation
 import Observation
 
-/// One project surfaced in the landing screen's Recent Projects column, paired with
-/// its most-recently-updated sessions (newest first).
+/// One project surfaced in the landing screen's Recent Projects column, broken out
+/// into its instances (each carrying its own newest-first sessions). Ranked by the
+/// newest session across all of the project's instances.
 struct RecentProject: Identifiable, Equatable {
     let project: GMCCProjectEntry
     let recency: Date
-    let sessions: [RecentSession]
+    let instances: [RecentInstance]
 
     var id: UUID { project.id }
+}
+
+/// One instance within a recent project — preserves per-instance identity
+/// (RepName + on-disk checkout) that the old flat session list dropped.
+struct RecentInstance: Identifiable, Equatable {
+    let id: UUID                     // instance UUID
+    let instanceName: String
+    let code: String
+    let systemPath: String?
+    let repositoryName: String?
+    let sessions: [RecentSession]
 }
 
 struct RecentSession: Identifiable, Equatable {
@@ -73,14 +85,16 @@ final class RecentsModel {
             }
         }
 
-        // Derive: per project, gather all sessions across its instances; rank by
-        // newest session; keep top N projects with their M newest sessions each.
+        // Derive: per project, one section per instance (carrying RepName +
+        // systemPath), each with its own newest M sessions. Rank projects by the
+        // newest session across their instances; keep top N projects.
         var derived: [RecentProject] = []
         for project in index.projects {
             guard let pdata = fs.projectData[project.id] else { continue }
-            var sessions: [RecentSession] = []
+            var instances: [RecentInstance] = []
             for instance in pdata.instances {
                 guard let idata = fs.instanceData[instance.id] else { continue }
+                var sessions: [RecentSession] = []
                 for session in idata.sessions {
                     sessions.append(RecentSession(
                         windowID: SessionWindowID(
@@ -95,14 +109,27 @@ final class RecentsModel {
                         updated: parse(session.base.updatedTime)
                     ))
                 }
+                // Hide instances with no sessions to show.
+                guard !sessions.isEmpty else { continue }
+                sessions.sort { $0.updated > $1.updated }
+                instances.append(RecentInstance(
+                    id: instance.id,
+                    instanceName: instance.base.name,
+                    code: instance.base.code,
+                    systemPath: instance.systemPath ?? idata.systemPath,
+                    repositoryName: pdata.repositoryName,
+                    sessions: Array(sessions.prefix(sessionLimit))
+                ))
             }
-            // Only surface projects that actually have sessions to show.
-            guard !sessions.isEmpty else { continue }
-            sessions.sort { $0.updated > $1.updated }
+            // Only surface projects with at least one instance that has sessions.
+            guard !instances.isEmpty else { continue }
+            let recency = instances
+                .compactMap { $0.sessions.first?.updated }
+                .max() ?? .distantPast
             derived.append(RecentProject(
                 project: project,
-                recency: sessions.first?.updated ?? .distantPast,
-                sessions: Array(sessions.prefix(sessionLimit))
+                recency: recency,
+                instances: instances
             ))
         }
         derived.sort { $0.recency > $1.recency }

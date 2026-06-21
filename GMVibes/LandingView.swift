@@ -131,7 +131,7 @@ private struct RecentProjectCard: View {
     let openSession: (SessionWindowID) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Image(systemName: "folder")
                     .foregroundStyle(.secondary)
@@ -140,7 +140,36 @@ private struct RecentProjectCard: View {
                 Spacer()
             }
 
-            ForEach(recent.sessions) { session in
+            ForEach(recent.instances) { instance in
+                InstanceSection(instance: instance, openSession: openSession)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: .rect(cornerRadius: 14))
+    }
+}
+
+/// One instance's title row (RepName · name · system path + path actions) followed by
+/// its newest sessions.
+private struct InstanceSection: View {
+    let instance: RecentInstance
+    let openSession: (SessionWindowID) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "internaldrive")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                identityText
+                Spacer(minLength: 8)
+                InstancePathActions(systemPath: instance.systemPath,
+                                    instanceUUID: instance.id,
+                                    instanceName: instance.instanceName)
+            }
+
+            ForEach(instance.sessions) { session in
                 Button {
                     openSession(session.windowID)
                 } label: {
@@ -161,14 +190,33 @@ private struct RecentProjectCard: View {
                             .foregroundStyle(.tertiary)
                     }
                     .padding(.vertical, 4)
+                    .padding(.leading, 18)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 14))
+    }
+
+    // RepName · instance name · system path — only the fields that are present.
+    @ViewBuilder
+    private var identityText: some View {
+        HStack(spacing: 6) {
+            if let repo = instance.repositoryName, !repo.isEmpty {
+                Text(repo).font(.subheadline.weight(.medium))
+                Text("·").foregroundStyle(.tertiary)
+            }
+            Text(instance.instanceName)
+                .font(.subheadline.weight(.medium))
+            if let path = instance.systemPath, !path.isEmpty {
+                Text("·").foregroundStyle(.tertiary)
+                Text(path)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
     }
 }
 

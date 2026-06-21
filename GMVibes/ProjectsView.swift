@@ -284,7 +284,8 @@ private struct InstanceDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if let data = fs.instanceData[route.instanceUUID] {
-                    InstanceHeaderCard(data: data)
+                    InstanceHeaderCard(data: data,
+                                       repositoryName: fs.projectData[route.projectUUID]?.repositoryName)
                     SessionListView(instance: data)
                 } else {
                     ProgressView().controlSize(.regular)
@@ -334,13 +335,21 @@ private struct InstanceDetailView: View {
 
 private struct InstanceHeaderCard: View {
     let data: GMCCInstanceDataFile
+    let repositoryName: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(data.base.name).font(.title2.weight(.semibold))
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(data.base.name).font(.title2.weight(.semibold))
+                Spacer()
+                InstancePathActions(systemPath: data.systemPath,
+                                    instanceUUID: data.base.uuid,
+                                    instanceName: data.base.name)
+            }
             if !data.base.description.isEmpty {
                 Text(data.base.description).font(.callout).foregroundStyle(.secondary)
             }
             metaRow("code",        data.base.code)
+            if let repo = repositoryName, !repo.isEmpty { metaRow("repository", repo) }
             metaRow("uuid",        data.base.uuid.uuidString)
             if let sys = data.systemPath { metaRow("system_path", sys) }
             metaRow("absolute",    data.paths.absolutePath)
@@ -475,7 +484,8 @@ private struct SessionPromptsView: View {
                     sessionDataURL: sessionDataURL,
                     promptsDirURL: route.promptsDirURL,
                     nextID: nextPromptID,
-                    preselectedKbites: session.kbite
+                    preselectedKbites: session.kbite,
+                    sessionBackstory: session.backstory
                 )
             } else {
                 Color.clear.onAppear { showCreatePrompt = false }

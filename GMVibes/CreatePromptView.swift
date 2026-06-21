@@ -15,9 +15,13 @@ struct CreatePromptView: View {
     let promptsDirURL: URL
     let nextID: Int
     let preselectedKbites: [String]
+    // Parent session's backstory, inherited into the new prompt at sheet-open
+    // (pre-filled, editable — the prompt's backstory may then diverge).
+    let sessionBackstory: String
 
     @State private var name: String = ""
     @State private var backstory: String = ""
+    @State private var didSeedBackstory = false
     @State private var goal: String = ""
     @State private var detail: String = ""
     @State private var availableKbites: [String] = []
@@ -79,7 +83,11 @@ struct CreatePromptView: View {
             }
         }
         .frame(minWidth: 520, minHeight: 560)
-        .task { loadKbites() }
+        .task {
+            loadKbites()
+            // Inherit the session backstory once; never clobber user edits on re-entry.
+            if !didSeedBackstory { backstory = sessionBackstory; didSeedBackstory = true }
+        }
     }
 
     // MARK: - KBite options

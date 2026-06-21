@@ -23,6 +23,14 @@ struct SessionPromptEditorView: View {
         sessionDirURL.deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("instance_data.gmcc.yaml")
     }
+    // …/instances/{instance}/sessions/{slug}  →  up to the project dir (drop {slug},
+    // "sessions", {instance}, "instances") for the parent project_data.gmcc.yaml.
+    private var projectDataURL: URL {
+        sessionDirURL
+            .deletingLastPathComponent().deletingLastPathComponent()   // → instance dir
+            .deletingLastPathComponent().deletingLastPathComponent()   // → project dir
+            .appendingPathComponent("project_data.gmcc.yaml")
+    }
 
     private var session: GMCCSessionDataFile? { fs.sessionData[sessionDataURL] }
     // Newest first — "default newest" selection + natural authoring order.
@@ -35,12 +43,24 @@ struct SessionPromptEditorView: View {
     private var instanceName: String {
         fs.instanceData[windowID.instanceUUID]?.base.name ?? "—"
     }
+    // The instance's on-disk checkout (instance_data's system_path).
+    private var systemPath: String? {
+        fs.instanceData[windowID.instanceUUID]?.systemPath
+    }
+    // RepName from the parent project_data (looked up via the instance's projectUUID).
+    private var repositoryName: String? {
+        guard let pid = fs.instanceData[windowID.instanceUUID]?.projectUUID else { return nil }
+        return fs.projectData[pid]?.repositoryName
+    }
 
     var body: some View {
         NavigationSplitView {
             PromptNavigator(
                 sessionName: windowID.sessionName,
                 instanceName: instanceName,
+                instanceUUID: windowID.instanceUUID,
+                repositoryName: repositoryName,
+                systemPath: systemPath,
                 prompts: prompts,
                 selectedID: $selectedID
             )
@@ -82,7 +102,8 @@ struct SessionPromptEditorView: View {
                     sessionDataURL: sessionDataURL,
                     promptsDirURL: promptsDirURL,
                     nextID: (prompts.map(\.promptID).max() ?? 0) + 1,
-                    preselectedKbites: session.kbite
+                    preselectedKbites: session.kbite,
+                    sessionBackstory: session.backstory
                 )
             } else {
                 Color.clear.onAppear { showCreatePrompt = false }
@@ -101,6 +122,10 @@ struct SessionPromptEditorView: View {
             while !Task.isCancelled {
                 await fs.refreshSessionData(at: sessionDataURL)
                 await fs.refreshInstanceData(uuid: windowID.instanceUUID, at: instanceDataURL)
+                // Warm the parent project_data so RepName resolves in the header.
+                if let pid = fs.instanceData[windowID.instanceUUID]?.projectUUID {
+                    await fs.refreshProjectData(uuid: pid, at: projectDataURL)
+                }
                 if !didDefaultSelect, selectedID == nil, let first = prompts.first {
                     selectedID = first.promptID
                     didDefaultSelect = true
@@ -116,6 +141,9 @@ struct SessionPromptEditorView: View {
 private struct PromptNavigator: View {
     let sessionName: String
     let instanceName: String
+    let instanceUUID: UUID
+    let repositoryName: String?
+    let systemPath: String?
     let prompts: [GMCCPromptFilesEntry]
     @Binding var selectedID: Int?
 
@@ -134,12 +162,16 @@ private struct PromptNavigator: View {
             } header: {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(sessionName).font(.headline)
-                    // instance → session mapping under the session name.
+                    // RepName · instance · system path → session, with path actions.
                     HStack(spacing: 4) {
                         Image(systemName: "internaldrive").font(.caption2)
-                        Text(instanceName)
+                        identityText
                         Image(systemName: "arrow.right").font(.caption2)
                         Text(sessionName)
+                        Spacer(minLength: 6)
+                        InstancePathActions(systemPath: systemPath,
+                                            instanceUUID: instanceUUID,
+                                            instanceName: instanceName)
                     }
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -149,6 +181,23 @@ private struct PromptNavigator: View {
             }
         }
         .listStyle(.sidebar)
+    }
+
+    // RepName · instance name · system path — only the fields that are present.
+    @ViewBuilder
+    private var identityText: some View {
+        if let repo = repositoryName, !repo.isEmpty {
+            Text(repo)
+            Text("·").foregroundStyle(.tertiary)
+        }
+        Text(instanceName)
+        if let path = systemPath, !path.isEmpty {
+            Text("·").foregroundStyle(.tertiary)
+            Text(path)
+                .monospaced()
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
     }
 }
 
@@ -236,6 +285,10 @@ private struct PromptEditorPane: View {
         guard let p = fs.instanceData[instanceUUID]?.systemPath, !p.isEmpty else { return nil }
         return URL(fileURLWithPath: p, isDirectory: true)
     }
+    // Instance display name — used to name the per-instance iTerm Dynamic Profile.
+    private var instanceName: String {
+        fs.instanceData[instanceUUID]?.base.name ?? "—"
+    }
 
     // The three initial fields are editable only while the prompt is a Draft;
     // once it's Clarifying/Clarified the initial prompt is frozen.
@@ -276,6 +329,15 @@ private struct PromptEditorPane: View {
                     Button { applyRedo() } label: { Label("Redo", systemImage: "arrow.uturn.forward") }
                         .disabled(!history.canRedo)
                 }
+            }
+            // iTerm: open a terminal rooted at the instance's target repo. Uses a
+            // per-instance Dynamic Profile so spawned windows/tabs inherit the repo dir.
+            ToolbarItemGroup {
+                Button { openInITerm(repoFolderURL) } label: {
+                    Label("Open in iTerm", systemImage: "terminal")
+                }
+                .disabled(repoFolderURL == nil)
+                .help("Open an iTerm2 window in the instance's target repo (window cwd = repo, via a per-instance dynamic profile)")
             }
             ToolbarItemGroup {
                 Button { openInVSCode(repoFolderURL) } label: {
@@ -556,6 +618,11 @@ private struct PromptEditorPane: View {
         VSCode.open(url)
     }
 
+    private func openInITerm(_ url: URL?) {
+        guard let url else { return }
+        ITerm.open(dir: url, instanceUUID: instanceUUID, instanceName: instanceName)
+    }
+
     private func currentState() -> PromptEditHistory.EditState {
         .init(backstory: backstory, goal: goal, detail: detail)
     }
@@ -724,5 +791,95 @@ enum VSCode {
         } else {
             ws.activateFileViewerSelecting([url])
         }
+    }
+}
+
+// MARK: - iTerm2 launcher
+
+// Opens an iTerm2 window rooted at `dir` via a PER-INSTANCE Dynamic Profile, so
+// windows/tabs spawned from it default to the same repo dir. The profile JSON is
+// rewritten in place (deterministic Guid) on every open; a single malformed file
+// disables ALL dynamic profiles, so we serialize/validate, then write atomically.
+// Falls back to NSWorkspace open-at-dir, then a Finder reveal — mirroring VSCode.
+enum ITerm {
+    // Writes the per-instance Dynamic Profile OFF the main thread, then opens the
+    // window ON the main thread. Both the file write and a cold-iTerm AppleScript
+    // launch are slow enough to hitch the UI if run inline from the button action.
+    static func open(dir: URL, instanceUUID: UUID, instanceName: String) {
+        let guid = "gmvibes-\(instanceUUID.uuidString)"
+        let name = "GMVibes — \(instanceName)"
+        Task.detached(priority: .userInitiated) {
+            let wrote = writeProfile(guid: guid, name: name, workingDir: dir.path)
+            await MainActor.run { launch(dir: dir, profileName: name, profileWritten: wrote) }
+        }
+    }
+
+    // Open a window for the per-instance profile, falling back to NSWorkspace
+    // open-at-dir, then a Finder reveal — mirroring VSCode. NSAppleScript must run
+    // on the main thread (TN2097), so this whole step is MainActor-isolated.
+    @MainActor
+    private static func launch(dir: URL, profileName: String, profileWritten: Bool) {
+        if profileWritten, runAppleScript(profileName: profileName) { return }
+        let ws = NSWorkspace.shared
+        if let term = ws.urlForApplication(withBundleIdentifier: "com.googlecode.iterm2") {
+            ws.open([dir], withApplicationAt: term, configuration: NSWorkspace.OpenConfiguration())
+        } else {
+            ws.activateFileViewerSelecting([dir])
+        }
+    }
+
+    // ~/Library/Application Support/iTerm2/DynamicProfiles, created if absent.
+    // `nonisolated` so the profile write can run off the main actor.
+    private nonisolated static func dynamicProfilesDir() -> URL? {
+        guard let appSup = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                    in: .userDomainMask).first else { return nil }
+        let dir = appSup.appendingPathComponent("iTerm2/DynamicProfiles", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    // Idempotent per-instance profile file: gmvibes-<UUID>.json with one profile.
+    // JSONSerialization both validates the shape and renders the bytes we write.
+    // `nonisolated` so it can run off the main actor (pure FileManager/JSON work).
+    private nonisolated static func writeProfile(guid: String, name: String, workingDir: String) -> Bool {
+        guard let dir = dynamicProfilesDir() else { return false }
+        let payload: [String: Any] = ["Profiles": [[
+            "Guid": guid,
+            "Name": name,
+            "Custom Directory": "Yes",
+            "Working Directory": workingDir,
+        ]]]
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload,
+                                                     options: [.prettyPrinted]) else { return false }
+        let url = dir.appendingPathComponent("\(guid).json")
+        let tmp = dir.appendingPathComponent(".\(guid).json.tmp")
+        do {
+            try data.write(to: tmp, options: .atomic)
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            return false
+        }
+    }
+
+    // Open a window for the named profile (NSWorkspace can't select a profile).
+    // The AppleScript API is deprecated but functional; NSAppleScript drives it.
+    @MainActor
+    private static func runAppleScript(profileName: String) -> Bool {
+        // AppleScript string literals don't support backslash escaping — splice any
+        // embedded double quote in via the `quote` constant instead.
+        let escaped = profileName.replacingOccurrences(of: "\"", with: "\" & quote & \"")
+        let source = """
+        tell application "iTerm2"
+            create window with profile "\(escaped)"
+            activate
+        end tell
+        """
+        guard let script = NSAppleScript(source: source) else { return false }
+        var err: NSDictionary?
+        script.executeAndReturnError(&err)
+        return err == nil
     }
 }
