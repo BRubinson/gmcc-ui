@@ -38,16 +38,11 @@ struct ProjectsScene: View {
     }
 }
 
-/// Per-session window — placeholder for now (one window per session UUID).
+/// Per-session window — hosts the prompt-authoring editor (one window per session UUID).
 struct SessionTodoView: View {
     let windowID: SessionWindowID
 
     var body: some View {
-        Text("todo")
-            .font(.largeTitle)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationTitle(windowID.sessionName)
-            .frame(minWidth: 480, minHeight: 320)
+        SessionPromptEditorView(windowID: windowID)
     }
 }

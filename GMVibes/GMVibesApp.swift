@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 @main
 struct GMVibesApp: App {
@@ -38,6 +39,7 @@ struct GMVibesApp: App {
             if let windowID {
                 SessionTodoView(windowID: windowID)
                     .gmccEnv(gmccEnvironment, fileSystem)
+                    .modelContainer(PromptHistoryStore.container)
             } else {
                 Text("No session")
                     .foregroundStyle(.secondary)

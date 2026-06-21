@@ -108,6 +108,33 @@ nonisolated enum GMCCRuntimeEncoder {
         return promptDir
     }
 
+    /// Rewrites an existing {id}_{name}_initial.yaml in place with new
+    /// backstory/goal/detail prose. Regenerates the whole file (yeet header +
+    /// the three block scalars + kbites_loaded + optional kbite_context_summary)
+    /// rather than patching lines, then writes via the atomic .tmp-replace
+    /// primitive so the 1s read loop never observes a partial file. The caller
+    /// supplies the kbites_loaded / kbite_context_summary it decoded so they
+    /// round-trip untouched.
+    static func writeInitialPromptFile(
+        at initialURL: URL,
+        backstory: String,
+        goal: String,
+        detail: String,
+        kbitesLoaded: [String],
+        kbiteContextSummary: String?
+    ) throws {
+        var lines: [String] = header("gmcc.gmcc_initial_prompt_file")
+        lines += blockScalar("backstory", backstory)
+        lines += blockScalar("goal", goal)
+        lines += blockScalar("detail", detail)
+        lines += listBlock("kbites_loaded", kbitesLoaded)
+        if let summary = kbiteContextSummary,
+           !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines += blockScalar("kbite_context_summary", summary)
+        }
+        try writeAtomicReplace(render(lines), to: initialURL)
+    }
+
     /// Stamps sessions/{slug}/session_data.gmcc.yaml (+ prompts/ subdir) with the
     /// given instance/project back-references, then appends a session entry to the
     /// parent instance_data.gmcc.yaml's sessions[] list. Returns the session dir URL.

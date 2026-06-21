@@ -20,12 +20,27 @@ struct KnowledgeBitesView: View {
         .toolbar {
             ToolbarItem {
                 Button {
+                    if let url = rootFolderURL { VSCode.open(url) }
+                } label: {
+                    Label("Open in VS Code", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+                .disabled(rootFolderURL == nil)
+                .help("Open this kbites folder (in the ckfs) in VS Code")
+            }
+            ToolbarItem {
+                Button {
                     store.refresh()
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
             }
         }
+    }
+
+    // The ckfs folder backing the current tab (open / digested kbites root).
+    private var rootFolderURL: URL? {
+        guard let path = gmcc[selectedTab.envKey], !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
     }
 }
 
