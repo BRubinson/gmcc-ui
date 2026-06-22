@@ -24,4 +24,5 @@ struct GMCCSessionEntry: Identifiable, Equatable, Hashable {
     var promptsDirectoryURL: URL { paths.absoluteURL.appendingPathComponent("prompts", isDirectory: true) }
 
     func matches(query: String) -> Bool { base.matches(query: query) }
+    func matches(_ query: SearchQuery) -> Bool { base.matches(query) }
 }

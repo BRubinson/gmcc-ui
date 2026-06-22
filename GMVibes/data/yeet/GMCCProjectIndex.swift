@@ -18,4 +18,5 @@ struct GMCCProjectEntry: Identifiable, Equatable, Hashable {
     var projectDataURL: URL { paths.absoluteURL.appendingPathComponent("project_data.gmcc.yaml") }
 
     func matches(query: String) -> Bool { base.matches(query: query) }
+    func matches(_ query: SearchQuery) -> Bool { base.matches(query) }
 }

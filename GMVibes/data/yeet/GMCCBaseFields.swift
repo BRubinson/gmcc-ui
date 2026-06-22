@@ -34,4 +34,13 @@ extension GMCCBaseFields {
         if description.localizedStandardContains(query) { return true }
         return false
     }
+
+    // Tokenized ANY-term match (name / code / id / description). Used by the
+    // project-load + prompt-list search so both screens share the same semantics:
+    // a row matches if it contains ANY space-separated term. Inactive query ⇒ true
+    // (callers treat "no query" as "show everything").
+    func matches(_ query: SearchQuery) -> Bool {
+        guard query.isActive else { return true }
+        return query.matchesAny(name, code, String(id), description)
+    }
 }

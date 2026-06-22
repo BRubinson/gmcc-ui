@@ -24,4 +24,5 @@ struct GMCCInstanceEntry: Identifiable, Equatable, Hashable {
     var instanceDataURL: URL { paths.absoluteURL.appendingPathComponent("instance_data.gmcc.yaml") }
 
     func matches(query: String) -> Bool { base.matches(query: query) }
+    func matches(_ query: SearchQuery) -> Bool { base.matches(query) }
 }

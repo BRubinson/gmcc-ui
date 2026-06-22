@@ -1,79 +1,33 @@
 import SwiftUI
 
-// MARK: - Route values for the NavigationStack
-
-struct InstanceRoute: Hashable {
-    let projectUUID: UUID
-    let instanceUUID: UUID
-    let instanceDataURL: URL
-    let instanceName: String
-}
-
-struct SessionRoute: Hashable {
-    let instanceUUID: UUID
-    let sessionUUID: UUID
-    let promptsDirURL: URL
-    let sessionName: String
-}
-
 // MARK: - Root view
+//
+// File-explorer tree over the ckfs entity hierarchy: projects are folders,
+// instances are folders nested inside them, sessions are leaf rows. Expanding a
+// folder streams its children in via the existing 1s polled refresh; clicking a
+// session opens the per-session editor window. There is NO push navigation — the
+// old NavigationStack([AnyHashable]) + InstanceRoute push (which crashed on
+// instance selection) is gone; selection/expansion is purely local tree state.
 
 struct ProjectsView: View {
     @Environment(GMCCEnvironment.self) private var gmcc
     @Environment(GMCCFileSystemEmulation.self) private var fs
 
-    @State private var path: [AnyHashable] = []
     @State private var query: String = ""
     @State private var expanded: Set<UUID> = []
 
     var body: some View {
-        NavigationStack(path: pathBinding) {
-            ProjectTreeView(query: $query, expanded: $expanded, path: pathBinding)
+        // NavigationStack hosts only the title + searchable chrome (no path).
+        NavigationStack {
+            ProjectTreeView(query: $query, expanded: $expanded)
                 .navigationTitle("Projects")
-                .navigationDestination(for: InstanceRoute.self) { route in
-                    InstanceDetailView(route: route)
-                }
-                .navigationDestination(for: SessionRoute.self) { route in
-                    SessionPromptsView(route: route)
-                }
-                .searchable(text: $query, placement: .toolbar, prompt: "Search projects & instances")
+                .searchable(text: $query, placement: .toolbar,
+                            prompt: "Search projects, instances & sessions")
         }
-        // Selection-drift recovery — applied at the stack root so it works at any
-        // depth (a vanished project pops session+instance+root drift in one pass).
-        .onChange(of: fs.projectIndex) { _, _ in pruneStaleRoutes() }
-        .onChange(of: fs.projectData)  { _, _ in pruneStaleRoutes() }
-        .onChange(of: fs.instanceData) { _, _ in pruneStaleRoutes() }
-    }
-
-    private var pathBinding: Binding<[AnyHashable]> { $path }
-
-    private func pruneStaleRoutes() {
-        var truncated: [AnyHashable] = []
-        for entry in path {
-            if let r = entry as? InstanceRoute, !isInstanceRouteValid(r) { break }
-            if let r = entry as? SessionRoute, !isSessionRouteValid(r) { break }
-            truncated.append(entry)
-        }
-        if truncated.count != path.count {
-            path = truncated
-        }
-    }
-
-    private func isInstanceRouteValid(_ route: InstanceRoute) -> Bool {
-        guard let idx = fs.projectIndex else { return true }
-        guard idx.projects.contains(where: { $0.id == route.projectUUID }) else { return false }
-        // If project_data isn't loaded yet, give it the benefit of the doubt.
-        guard let pdata = fs.projectData[route.projectUUID] else { return true }
-        return pdata.instances.contains(where: { $0.id == route.instanceUUID })
-    }
-
-    private func isSessionRouteValid(_ route: SessionRoute) -> Bool {
-        guard let idata = fs.instanceData[route.instanceUUID] else { return true }
-        return idata.sessions.contains(where: { $0.id == route.sessionUUID })
     }
 }
 
-// MARK: - Project tree (root screen)
+// MARK: - Project tree (the whole screen)
 
 private struct ProjectTreeView: View {
     @Environment(GMCCEnvironment.self) private var gmcc
@@ -81,12 +35,14 @@ private struct ProjectTreeView: View {
 
     @Binding var query: String
     @Binding var expanded: Set<UUID>
-    @Binding var path: [AnyHashable]
 
     var body: some View {
         List {
             ForEach(visibleProjects, id: \.id) { project in
-                projectRow(project)
+                ProjectRow(project: project,
+                           query: query,
+                           expanded: $expanded,
+                           forceExpanded: forceExpanded)
             }
             if visibleProjects.isEmpty {
                 emptyRow
@@ -101,50 +57,44 @@ private struct ProjectTreeView: View {
 
     private var projects: [GMCCProjectEntry] { fs.projectIndex?.projects ?? [] }
 
-    // View-layer filter: when query is non-empty, hide projects that neither
-    // themselves match nor have any matching instance. Force-expand projects
-    // with a matching descendant.
+    // View-layer filter. With an active query, keep a project only if it matches
+    // itself or has any matching instance/session (descendant match).
     private var visibleProjects: [GMCCProjectEntry] {
-        guard !query.isEmpty else { return projects }
-        return projects.filter { project in
-            if project.matches(query: query) { return true }
-            let instances = fs.projectData[project.id]?.instances ?? []
-            return instances.contains { $0.matches(query: query) }
-        }
+        let q = SearchQuery(query)
+        guard q.isActive else { return projects }
+        return projects.filter { projectHasMatch($0, q) }
     }
 
+    // Every ancestor uuid of any match, so matching folders auto-open. A matching
+    // instance opens its project; a matching session opens its instance + project.
     private var forceExpanded: Set<UUID> {
-        guard !query.isEmpty else { return [] }
+        let q = SearchQuery(query)
+        guard q.isActive else { return [] }
         var out: Set<UUID> = []
         for project in projects {
             let instances = fs.projectData[project.id]?.instances ?? []
-            if instances.contains(where: { $0.matches(query: query) }) {
-                out.insert(project.id)
+            var projectShouldOpen = false
+            for instance in instances {
+                let sessions = fs.instanceData[instance.id]?.sessions ?? []
+                let sessionMatch = sessions.contains { $0.matches(q) }
+                if instance.matches(q) || sessionMatch { projectShouldOpen = true }
+                if sessionMatch { out.insert(instance.id) }
             }
+            if projectShouldOpen { out.insert(project.id) }
         }
         return out
     }
 
-    @ViewBuilder
-    private func projectRow(_ project: GMCCProjectEntry) -> some View {
-        let isExpanded = Binding<Bool>(
-            get: { expanded.contains(project.id) || forceExpanded.contains(project.id) },
-            set: { newValue in
-                if newValue { expanded.insert(project.id) } else { expanded.remove(project.id) }
-            }
-        )
-
-        DisclosureGroup(isExpanded: isExpanded) {
-            InstanceList(
-                project: project,
-                query: query,
-                path: $path
-            )
-        } label: {
-            ProjectLabel(project: project)
+    // A project is relevant when it matches, or any instance matches, or any
+    // session under any instance matches.
+    private func projectHasMatch(_ project: GMCCProjectEntry, _ q: SearchQuery) -> Bool {
+        if project.matches(q) { return true }
+        let instances = fs.projectData[project.id]?.instances ?? []
+        return instances.contains { instance in
+            if instance.matches(q) { return true }
+            let sessions = fs.instanceData[instance.id]?.sessions ?? []
+            return sessions.contains { $0.matches(q) }
         }
-        // No .task here — the 1s refresh lives inside InstanceList so it only
-        // fires while the project is actually expanded (matches "1 file per page").
     }
 
     private var emptyRow: some View {
@@ -165,9 +115,12 @@ private struct ProjectTreeView: View {
     }
 }
 
-// One-shot prefetch of every project's project_data — required so the search
-// filter can see instance names of projects the user hasn't manually expanded.
-// Only kicks in when the query becomes non-empty.
+// MARK: - Search prefetch
+//
+// One-shot prefetch when the query becomes non-empty: load every project's
+// project_data (instances), then every instance's instance_data (sessions), so
+// the filter + force-expand can see instance and session names of folders the
+// user hasn't manually opened. Trees are small, so the deep walk is cheap.
 private struct SearchPrefetchView: View {
     @Environment(GMCCFileSystemEmulation.self) private var fs
     let query: String
@@ -177,71 +130,80 @@ private struct SearchPrefetchView: View {
             .frame(width: 0, height: 0)
             .task(id: query.isEmpty) {
                 guard !query.isEmpty, let idx = fs.projectIndex else { return }
-                for project in idx.projects where fs.projectData[project.id] == nil {
-                    await fs.refreshProjectData(uuid: project.id, at: project.projectDataURL)
+                for project in idx.projects {
+                    if fs.projectData[project.id] == nil {
+                        await fs.refreshProjectData(uuid: project.id, at: project.projectDataURL)
+                    }
+                    let instances = fs.projectData[project.id]?.instances ?? []
+                    for instance in instances where fs.instanceData[instance.id] == nil {
+                        await fs.refreshInstanceData(uuid: instance.id, at: instance.instanceDataURL)
+                    }
                 }
             }
     }
 }
 
-private struct ProjectLabel: View {
+// MARK: - Project folder (level 0)
+
+private struct ProjectRow: View {
     let project: GMCCProjectEntry
+    let query: String
+    @Binding var expanded: Set<UUID>
+    let forceExpanded: Set<UUID>
+
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "folder")
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(project.base.name)
-                    .font(.body)
-                Text(project.base.code)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+        DisclosureGroup(isExpanded: expansionBinding) {
+            InstanceLevel(project: project,
+                          query: query,
+                          expanded: $expanded,
+                          forceExpanded: forceExpanded)
+        } label: {
+            FolderLabel(name: project.base.name, subtitle: project.base.code,
+                        systemImage: "folder")
         }
+    }
+
+    private var expansionBinding: Binding<Bool> {
+        Binding(
+            get: { expanded.contains(project.id) || forceExpanded.contains(project.id) },
+            set: { open in
+                if open { expanded.insert(project.id) } else { expanded.remove(project.id) }
+            }
+        )
     }
 }
 
-private struct InstanceList: View {
+// Instances of a project. The .task here only runs while the project folder is
+// expanded (this body is built only then), so we poll project_data exactly while
+// it's on screen — matching the app's "active page polls" convention.
+private struct InstanceLevel: View {
     @Environment(GMCCFileSystemEmulation.self) private var fs
     let project: GMCCProjectEntry
     let query: String
-    @Binding var path: [AnyHashable]
+    @Binding var expanded: Set<UUID>
+    let forceExpanded: Set<UUID>
 
     var body: some View {
         Group {
             if let cached = fs.projectData[project.id] {
-                let instances = cached.instances.filter { instance in
-                    query.isEmpty
-                        || project.matches(query: query)
-                        || instance.matches(query: query)
-                }
+                let instances = visibleInstances(cached.instances)
                 if instances.isEmpty {
-                    Text("No instances.")
+                    Text(query.isEmpty ? "No instances." : "No matching instances.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(instances, id: \.id) { instance in
-                        Button {
-                            path.append(AnyHashable(InstanceRoute(
-                                projectUUID: project.id,
-                                instanceUUID: instance.id,
-                                instanceDataURL: instance.instanceDataURL,
-                                instanceName: instance.base.name
-                            )))
-                        } label: {
-                            InstanceLabel(instance: instance)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+                        InstanceRow(instance: instance,
+                                    project: project,
+                                    query: query,
+                                    expanded: $expanded,
+                                    forceExpanded: forceExpanded)
                     }
                 }
             } else {
-                ProgressView()
-                    .controlSize(.small)
+                ProgressView().controlSize(.small)
             }
         }
-        // 1s refresh — runs only while this disclosure is expanded (InstanceList
-        // body is only built then). Matches "active page = 1 file at a time".
         .task(id: project.id) {
             while !Task.isCancelled {
                 await fs.refreshProjectData(uuid: project.id, at: project.projectDataURL)
@@ -249,288 +211,150 @@ private struct InstanceList: View {
             }
         }
     }
+
+    private func visibleInstances(_ instances: [GMCCInstanceEntry]) -> [GMCCInstanceEntry] {
+        let q = SearchQuery(query)
+        // Newest-first by last-updated (ISO 8601 sorts chronologically as a string).
+        let sorted = instances.sorted { $0.base.updatedTime > $1.base.updatedTime }
+        guard q.isActive else { return sorted }
+        // The whole project matched ⇒ show all its instances; otherwise keep
+        // instances that match or have a matching session.
+        if project.matches(q) { return sorted }
+        return sorted.filter { instance in
+            if instance.matches(q) { return true }
+            let sessions = fs.instanceData[instance.id]?.sessions ?? []
+            return sessions.contains { $0.matches(q) }
+        }
+    }
 }
 
-private struct InstanceLabel: View {
+// MARK: - Instance folder (level 1)
+
+private struct InstanceRow: View {
     let instance: GMCCInstanceEntry
+    let project: GMCCProjectEntry
+    let query: String
+    @Binding var expanded: Set<UUID>
+    let forceExpanded: Set<UUID>
+
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "internaldrive")
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(instance.base.name)
-                    .font(.body)
-                Text(instance.base.code)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Image(systemName: "chevron.right")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+        DisclosureGroup(isExpanded: expansionBinding) {
+            SessionLevel(instance: instance,
+                         project: project,
+                         query: query)
+        } label: {
+            FolderLabel(name: instance.base.name, subtitle: instance.base.code,
+                        systemImage: "folder")
         }
+    }
+
+    private var expansionBinding: Binding<Bool> {
+        Binding(
+            get: { expanded.contains(instance.id) || forceExpanded.contains(instance.id) },
+            set: { open in
+                if open { expanded.insert(instance.id) } else { expanded.remove(instance.id) }
+            }
+        )
     }
 }
 
-// MARK: - Instance detail (push #1)
-
-private struct InstanceDetailView: View {
+// Sessions of an instance. Polls instance_data while the instance folder is open.
+private struct SessionLevel: View {
     @Environment(GMCCFileSystemEmulation.self) private var fs
-    let route: InstanceRoute
-
-    @State private var showCreateSession = false
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if let data = fs.instanceData[route.instanceUUID] {
-                    InstanceHeaderCard(data: data,
-                                       repositoryName: fs.projectData[route.projectUUID]?.repositoryName)
-                    SessionListView(instance: data)
-                } else {
-                    ProgressView().controlSize(.regular)
-                }
-            }
-            .padding(20)
-            .frame(maxWidth: 720, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
-        }
-        .navigationTitle(route.instanceName)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showCreateSession = true
-                } label: {
-                    Label("New Session", systemImage: "plus")
-                }
-                .disabled(fs.instanceData[route.instanceUUID] == nil)
-                .help("Create a new session (git branch)")
-            }
-        }
-        .sheet(isPresented: $showCreateSession) {
-            if let data = fs.instanceData[route.instanceUUID] {
-                CreateSessionView(
-                    instanceDirURL: route.instanceDataURL.deletingLastPathComponent(),
-                    instanceRelPath: data.paths.relativePath,
-                    instanceDataURL: route.instanceDataURL,
-                    instanceUUID: route.instanceUUID,
-                    projectUUID: route.projectUUID,
-                    parentKbite: data.kbite
-                )
-            } else {
-                // Defensive: data vanished between tap and render — never strand
-                // the user on a blank sheet with no dismiss control.
-                Color.clear.onAppear { showCreateSession = false }
-            }
-        }
-        // Selection drift is handled centrally by ProjectsView.pruneStaleRoutes.
-        .task(id: route.instanceUUID) {
-            while !Task.isCancelled {
-                await fs.refreshInstanceData(uuid: route.instanceUUID, at: route.instanceDataURL)
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
-    }
-}
-
-private struct InstanceHeaderCard: View {
-    let data: GMCCInstanceDataFile
-    let repositoryName: String?
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(data.base.name).font(.title2.weight(.semibold))
-                Spacer()
-                InstancePathActions(systemPath: data.systemPath,
-                                    instanceUUID: data.base.uuid,
-                                    instanceName: data.base.name)
-            }
-            if !data.base.description.isEmpty {
-                Text(data.base.description).font(.callout).foregroundStyle(.secondary)
-            }
-            metaRow("code",        data.base.code)
-            if let repo = repositoryName, !repo.isEmpty { metaRow("repository", repo) }
-            metaRow("uuid",        data.base.uuid.uuidString)
-            if let sys = data.systemPath { metaRow("system_path", sys) }
-            metaRow("absolute",    data.paths.absolutePath)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
-    }
-
-    @ViewBuilder
-    private func metaRow(_ key: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(key)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .frame(width: 90, alignment: .trailing)
-            Text(value)
-                .font(.caption.monospaced())
-                .textSelection(.enabled)
-        }
-    }
-}
-
-private struct SessionListView: View {
-    @Environment(\.openWindow) private var openWindow
-    let instance: GMCCInstanceDataFile
+    let instance: GMCCInstanceEntry
+    let project: GMCCProjectEntry
+    let query: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Sessions").font(.headline)
-            if instance.sessions.isEmpty {
-                Text("No sessions.").font(.callout).foregroundStyle(.secondary)
-            } else {
-                ForEach(instance.sessions, id: \.id) { session in
-                    // Opening a session spawns its own window (one per session UUID),
-                    // rather than pushing the in-stack prompt list.
-                    Button {
-                        openWindow(value: SessionWindowID(
-                            sessionUUID: session.id,
-                            instanceUUID: instance.id,
-                            sessionName: session.base.name,
-                            promptsDirURL: session.promptsDirectoryURL
-                        ))
-                    } label: {
-                        SessionRow(session: session)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
-    }
-}
-
-private struct SessionRow: View {
-    let session: GMCCSessionEntry
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "arrow.triangle.branch")
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(session.base.name).font(.body)
-                HStack(spacing: 6) {
-                    if let branch = session.branch, !branch.isEmpty {
-                        Text(branch).font(.caption2.monospaced()).foregroundStyle(.secondary)
-                    }
-                    Text(session.base.code).font(.caption2).foregroundStyle(.tertiary)
-                }
-            }
-            Spacer()
-            Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
-        }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
-    }
-}
-
-// MARK: - Session prompts list (push #2)
-
-private struct SessionPromptsView: View {
-    @Environment(GMCCFileSystemEmulation.self) private var fs
-    let route: SessionRoute
-
-    @State private var showCreatePrompt = false
-
-    // session_data.gmcc.yaml sits beside the prompts/ directory.
-    private var sessionDirURL: URL { route.promptsDirURL.deletingLastPathComponent() }
-    private var sessionDataURL: URL { sessionDirURL.appendingPathComponent("session_data.gmcc.yaml") }
-
-    // Canonical next-prompt id = max of session_data prompts[].id + 1.
-    private var nextPromptID: Int {
-        let ids = fs.sessionData[sessionDataURL]?.prompts.map(\.promptID) ?? []
-        return (ids.max() ?? 0) + 1
-    }
-
-    var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                let stubs = fs.sessionPrompts[route.promptsDirURL] ?? []
-                if stubs.isEmpty {
-                    Text("No prompts in this session.")
+        Group {
+            if let cached = fs.instanceData[instance.id] {
+                let sessions = visibleSessions(cached.sessions)
+                if sessions.isEmpty {
+                    Text(query.isEmpty ? "No sessions." : "No matching sessions.")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(stubs) { stub in
-                        PromptRow(stub: stub)
+                    ForEach(sessions, id: \.id) { session in
+                        SessionRow(session: session, instanceUUID: instance.id)
                     }
                 }
-            }
-            .padding(20)
-            .frame(maxWidth: 820, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
-        }
-        .navigationTitle(route.sessionName)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showCreatePrompt = true
-                } label: {
-                    Label("New Prompt", systemImage: "plus")
-                }
-                .disabled(fs.sessionData[sessionDataURL] == nil)
-                .help("Create a new prompt in this session")
-            }
-        }
-        .sheet(isPresented: $showCreatePrompt) {
-            if let session = fs.sessionData[sessionDataURL] {
-                CreatePromptView(
-                    sessionDirURL: sessionDirURL,
-                    sessionRelPath: session.paths.relativePath,
-                    sessionDataURL: sessionDataURL,
-                    promptsDirURL: route.promptsDirURL,
-                    nextID: nextPromptID,
-                    preselectedKbites: session.kbite,
-                    sessionBackstory: session.backstory
-                )
             } else {
-                Color.clear.onAppear { showCreatePrompt = false }
+                ProgressView().controlSize(.small)
             }
         }
-        .task(id: route) {
+        .task(id: instance.id) {
             while !Task.isCancelled {
-                await fs.refreshSessionData(at: sessionDataURL)
-                await fs.refreshSessionPrompts(at: route.promptsDirURL)
+                await fs.refreshInstanceData(uuid: instance.id, at: instance.instanceDataURL)
                 try? await Task.sleep(for: .seconds(1))
             }
         }
     }
+
+    private func visibleSessions(_ sessions: [GMCCSessionEntry]) -> [GMCCSessionEntry] {
+        let q = SearchQuery(query)
+        // Newest-first by last-updated (ISO 8601 sorts chronologically as a string).
+        let sorted = sessions.sorted { $0.base.updatedTime > $1.base.updatedTime }
+        guard q.isActive else { return sorted }
+        // If an ancestor (project/instance) matched, the whole subtree is relevant;
+        // otherwise keep only sessions that match.
+        if project.matches(q) || instance.matches(q) { return sorted }
+        return sorted.filter { $0.matches(q) }
+    }
 }
 
-private struct PromptRow: View {
-    let stub: PromptFileStub
-    @State private var body_: String = ""
+// MARK: - Session leaf (level 2)
+
+private struct SessionRow: View {
+    @Environment(\.openWindow) private var openWindow
+    let session: GMCCSessionEntry
+    let instanceUUID: UUID
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(stub.displayName).font(.headline)
-                Spacer()
-                Text(stub.modifiedAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption2)
+        Button {
+            // Opening a session spawns/focuses its own window (one per session UUID).
+            openWindow(value: SessionWindowID(
+                sessionUUID: session.id,
+                instanceUUID: instanceUUID,
+                sessionName: session.base.name,
+                promptsDirURL: session.promptsDirectoryURL
+            ))
+        } label: {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.base.name).font(.body)
+                    HStack(spacing: 6) {
+                        if let branch = session.branch, !branch.isEmpty {
+                            Text(branch).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                        }
+                        Text(session.base.code).font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+            } icon: {
+                Image(systemName: "arrow.triangle.branch")
                     .foregroundStyle(.secondary)
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(body_.isEmpty ? "(loading…)" : body_)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            .contentShape(Rectangle())
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 14))
-        // Key on the full stub (which includes modifiedAt) so the body re-reads
-        // when the file is rewritten on disk between 1s refreshes.
-        .task(id: stub) {
-            let text = await Task.detached(priority: .userInitiated) {
-                GMCCFileSystemEmulation.readRawFile(at: stub.url)
-            }.value
-            body_ = text
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Shared folder label
+
+private struct FolderLabel: View {
+    let name: String
+    let subtitle: String
+    let systemImage: String
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name).font(.body)
+                Text(subtitle).font(.caption2).foregroundStyle(.secondary)
+            }
+        } icon: {
+            Image(systemName: systemImage)
+                .foregroundStyle(.secondary)
         }
     }
 }

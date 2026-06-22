@@ -51,6 +51,14 @@ struct GMVibesApp: App {
         WindowGroup("KBite File", id: "kbite-md", for: URL.self) { $url in
             KBiteMarkdownWindowView(url: url)
         }
+
+        // Popped-out Memories explorer (one per prompt's memory folder). MUST inject
+        // .gmccEnv — the explorer reads GMCCFileSystemEmulation for the polled file
+        // tree, so without it the window would crash on a missing environment object.
+        WindowGroup("Prompt Memories", id: "prompt-memories", for: PromptMemoriesWindowID.self) { $windowID in
+            PromptMemoriesWindow(windowID: windowID)
+                .gmccEnv(gmccEnvironment, fileSystem)
+        }
     }
 }
 

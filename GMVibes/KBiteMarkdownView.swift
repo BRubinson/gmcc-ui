@@ -3,6 +3,9 @@ import SwiftUI
 struct KBiteMarkdownView: View {
     let url: URL
     var showOpenInWindow: Bool = true
+    // When set + active, the body renders as highlighted plain text (find-in-page)
+    // instead of block markdown — mirroring the Yeet reader's search behavior.
+    var findQuery: SearchQuery = SearchQuery("")
 
     @Environment(\.openWindow) private var openWindow
 
@@ -45,13 +48,21 @@ struct KBiteMarkdownView: View {
     @ViewBuilder
     private var content: some View {
         switch KBiteMarkdown.preview(for: url) {
-        case .markdown(let attributed):
-            Text(attributed)
-                .textSelection(.enabled)
+        case .markdown(let blocks, let source):
+            if findQuery.isActive {
+                // While searching, show highlighted plain text (matches Yeet).
+                HighlightedText(source: source, query: findQuery, activeLocalOccurrence: nil)
+            } else {
+                MarkdownBlocksView(blocks)
+            }
         case .text(let raw):
-            Text(raw)
-                .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
+            if findQuery.isActive {
+                HighlightedText(source: raw, query: findQuery, activeLocalOccurrence: nil)
+            } else {
+                Text(raw)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+            }
         case .unavailable(let message):
             VStack(alignment: .leading, spacing: 8) {
                 Label(message, systemImage: "doc.questionmark")

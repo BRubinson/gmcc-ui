@@ -705,16 +705,11 @@ private struct DescriptionView: View {
             Text(ctx.highlight(source, owningAnchorID: owningAnchorID))
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
-        } else if let attributed = try? AttributedString(
-            markdown: source,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
-            Text(attributed)
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
         } else {
-            Text(source)
-                .textSelection(.enabled)
+            // Native block rendering (headings/lists/code/tables) via the shared
+            // markdown renderer — the same upgrade the Memories reader uses.
+            MarkdownBlocksView(source: source)
+                .foregroundStyle(.primary)
         }
     }
 }

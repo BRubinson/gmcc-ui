@@ -1,7 +1,7 @@
 import Foundation
 
 enum KBitePreview {
-    case markdown(AttributedString)
+    case markdown(blocks: [MarkdownBlock], source: String)
     case text(String)
     case unavailable(String)
 }
@@ -25,12 +25,9 @@ enum KBiteMarkdown {
         }
 
         if url.pathExtension.lowercased() == "md" {
-            let options = AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .inlineOnlyPreservingWhitespace
-            )
-            if let attributed = try? AttributedString(markdown: text, options: options) {
-                return .markdown(attributed)
-            }
+            // Full block-level parse so headings / lists / code / tables render as
+            // real layout (MarkdownBlocksView) rather than flattened inline text.
+            return .markdown(blocks: MarkdownDocument.parse(text), source: text)
         }
 
         return .text(text)

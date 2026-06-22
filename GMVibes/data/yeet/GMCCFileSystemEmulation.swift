@@ -18,6 +18,12 @@ final class GMCCFileSystemEmulation {
     // Typed session_data files, keyed by the session_data.gmcc.yaml URL. Used by
     // the authoring surface to read the authoritative next-prompt id + kbite seed.
     private(set) var sessionData: [URL: GMCCSessionDataFile]    = [:]
+    // Polled directory snapshots, keyed by the walked root URL. Backs the Memories
+    // file explorer; refreshed on the page's 1s cadence so live agent writes appear.
+    private(set) var fileTrees: [URL: FileTreeNode]            = [:]
+    // Prompt initial.yaml bodies, keyed by the prompt's _data.gmcc.yaml URL. Warmed
+    // by the prompt-list search so it can filter on backstory/goal/detail content.
+    private(set) var promptInitials: [URL: GMCCInitialPromptFile] = [:]
 
     private(set) var lastError: [String: String] = [:]
 
@@ -91,6 +97,29 @@ final class GMCCFileSystemEmulation {
         }.value
         sessionPrompts[directoryURL] = stubs
         lastError[key] = nil
+    }
+
+    // Re-walk a directory subtree off the main actor and publish only if it actually
+    // changed (same shape + mtimes ⇒ no @Observable churn, so the explorer's
+    // selection/expansion don't thrash on every 1s tick). Clone of the
+    // refreshSessionPrompts pattern — same cadence, same mechanism.
+    func refreshFileTree(at root: URL) async {
+        let tree = await Task.detached(priority: .userInitiated) {
+            FileTreeNode.walk(root)
+        }.value
+        if fileTrees[root] != tree { fileTrees[root] = tree }
+    }
+
+    // Decode a prompt's data + initial.yaml off-main and cache the initial body,
+    // keyed by the prompt's _data.gmcc.yaml URL. Used by the prompt-list content filter.
+    func refreshPromptInitial(dataURL: URL) async {
+        let result: GMCCInitialPromptFile? = await Task.detached(priority: .userInitiated) {
+            guard let data = try? GMCCRuntimeDecoder.decodePromptData(at: dataURL) else { return nil }
+            let folder = dataURL.deletingLastPathComponent()
+            let iURL = folder.appendingPathComponent(data.initialPromptPath)
+            return try? GMCCRuntimeDecoder.decodeInitialPrompt(at: iURL)
+        }.value
+        if let result { promptInitials[dataURL] = result }
     }
 
     nonisolated private static func readPromptStubs(in directoryURL: URL) -> [PromptFileStub] {

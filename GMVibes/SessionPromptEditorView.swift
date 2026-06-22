@@ -14,6 +14,8 @@ struct SessionPromptEditorView: View {
     @State private var selectedID: Int?
     @State private var didDefaultSelect = false
     @State private var showCreatePrompt = false
+    // One list filter over both fields: name + content (all sections).
+    @State private var promptQuery = ""
 
     private var promptsDirURL: URL { windowID.promptsDirURL }
     private var sessionDirURL: URL { promptsDirURL.deletingLastPathComponent() }
@@ -40,6 +42,23 @@ struct SessionPromptEditorView: View {
     private var selectedEntry: GMCCPromptFilesEntry? {
         prompts.first { $0.promptID == selectedID }
     }
+    // Tokenized list filter: a prompt matches if its name OR prefetched
+    // backstory/goal/detail contains ANY space-separated term in the query.
+    private func dataURL(for entry: GMCCPromptFilesEntry) -> URL {
+        sessionDirURL.appendingPathComponent(entry.path)
+    }
+    private var filteredPrompts: [GMCCPromptFilesEntry] {
+        let q = SearchQuery(promptQuery)
+        guard q.isActive else { return prompts }
+        return prompts.filter { entry in
+            // One bar over both fields: name (+ id) and content (all sections).
+            var fields = [entry.name, String(entry.promptID)]
+            if let initial = fs.promptInitials[dataURL(for: entry)] {
+                fields.append(contentsOf: [initial.backstory, initial.goal, initial.detail])
+            }
+            return q.matchesAny(fields)
+        }
+    }
     private var instanceName: String {
         fs.instanceData[windowID.instanceUUID]?.base.name ?? "—"
     }
@@ -61,7 +80,8 @@ struct SessionPromptEditorView: View {
                 instanceUUID: windowID.instanceUUID,
                 repositoryName: repositoryName,
                 systemPath: systemPath,
-                prompts: prompts,
+                prompts: filteredPrompts,
+                query: $promptQuery,
                 selectedID: $selectedID
             )
             .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
@@ -133,6 +153,14 @@ struct SessionPromptEditorView: View {
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+        // Warm each prompt's initial.yaml so the list filter can match on content.
+        // Only runs while the search box is non-empty (mirrors ProjectsView prefetch).
+        .task(id: promptQuery) {
+            guard SearchQuery(promptQuery).isActive else { return }
+            for entry in prompts where fs.promptInitials[dataURL(for: entry)] == nil {
+                await fs.refreshPromptInitial(dataURL: dataURL(for: entry))
+            }
+        }
     }
 }
 
@@ -145,13 +173,14 @@ private struct PromptNavigator: View {
     let repositoryName: String?
     let systemPath: String?
     let prompts: [GMCCPromptFilesEntry]
+    @Binding var query: String
     @Binding var selectedID: Int?
 
     var body: some View {
         List(selection: $selectedID) {
             Section {
                 if prompts.isEmpty {
-                    Text("No prompts yet. Create one with +.")
+                    Text(query.isEmpty ? "No prompts yet. Create one with +." : "No matching prompts.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 } else {
@@ -181,6 +210,7 @@ private struct PromptNavigator: View {
             }
         }
         .listStyle(.sidebar)
+        .searchable(text: $query, placement: .sidebar, prompt: "Search name & content")
     }
 
     // RepName · instance name · system path — only the fields that are present.
@@ -247,7 +277,7 @@ private struct PromptEditorPane: View {
     let instanceUUID: UUID
 
     enum Field: Hashable { case backstory, goal, detail }
-    enum Tab: Hashable { case initial, clarified }
+    enum Tab: Hashable { case initial, clarified, memories }
 
     @State private var backstory = ""
     @State private var goal = ""
@@ -266,8 +296,21 @@ private struct PromptEditorPane: View {
     @State private var copiedField: Field?
     @State private var copiedKey: String?
     @FocusState private var focus: Field?
+    // Find-in-page over read-only content; Memories tab state; editor find bridge.
+    @State private var find = FindController()
+    @State private var memoriesModel = MemoriesExplorerModel()
+    @Environment(\.openWindow) private var openWindow
 
     private var promptKey: String { "\(sessionUUID.uuidString)/\(entry.promptID)" }
+
+    // The prompt's memory/ folder, derived synchronously from entry.path (which points
+    // at {prompt}/{...}_data.gmcc.yaml) so the Memories tab has a root immediately,
+    // without waiting on the async load() that sets promptFolderURL.
+    private var memoryRootURL: URL {
+        sessionDirURL.appendingPathComponent(entry.path)
+            .deletingLastPathComponent()
+            .appendingPathComponent("memory", isDirectory: true)
+    }
 
     // ckfs folder hierarchy, derived from the session dir
     // (.../projects/{P}/instances/{I}/sessions/{S}). The prompt folder is only
@@ -303,6 +346,57 @@ private struct PromptEditorPane: View {
         let clarified: GMCCClarifiedPromptFile?
     }
 
+    // MARK: Find-in-page (read-only content)
+
+    private var findQuery: SearchQuery { find.searchQuery }
+
+    // Tabs expose ordered, find-able text segments. The Initial tab contributes its
+    // three fields whether editable or read-only (the editable editor uses the same
+    // inline find-in-page bar, scrolling to the matching field).
+    private var findSegments: [(id: String, text: String)] {
+        switch tab {
+        case .initial:
+            return [("backstory", backstory), ("goal", goal), ("detail", detail)]
+        case .clarified:
+            guard let c = clarified else { return [] }
+            var segs: [(id: String, text: String)] = []
+            if !c.backstory.isEmpty { segs.append((id: "c-backstory", text: c.backstory)) }
+            segs.append((id: "c-goal", text: c.refinedGoal))
+            segs.append((id: "c-detail", text: c.refinedDetail))
+            return segs
+        default:
+            return []
+        }
+    }
+
+    private var findMatches: FindMatches {
+        FindMatches(segments: findSegments, query: findQuery)
+    }
+
+    private func activeLocal(_ id: String) -> Int? {
+        findMatches.activeLocalOccurrence(in: id, active: find.activeIndex)
+    }
+
+    private func stepFind(_ delta: Int, proxy: ScrollViewProxy) {
+        guard findMatches.total > 0 else { return }
+        find.activeIndex = findMatches.clampedActive(find.activeIndex + delta)
+        if let hit = findMatches.activeHit(find.activeIndex) {
+            withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(hit.segmentID, anchor: .center) }
+        }
+    }
+
+    private var supportsFind: Bool {
+        tab == .initial || tab == .clarified
+    }
+
+    private func segmentID(_ field: Field) -> String {
+        switch field {
+        case .backstory: "backstory"
+        case .goal:      "goal"
+        case .detail:    "detail"
+        }
+    }
+
     var body: some View {
         Group {
             if loaded {
@@ -312,6 +406,7 @@ private struct PromptEditorPane: View {
                     switch tab {
                     case .initial:   initialTab
                     case .clarified: clarifiedTab
+                    case .memories:  memoriesTab
                     }
                 }
             } else {
@@ -373,6 +468,20 @@ private struct PromptEditorPane: View {
         // Key on the whole entry so a live status change (Draft→Clarifying→Clarified)
         // reloads (refetches the clarified file, re-freezes the initial fields).
         .task(id: entry) { await load() }
+        // cmd+F: Initial (editable or read-only) and Clarified open the inline
+        // find-in-page bar. On the Memories tab, publish nil so the reader's own find
+        // handler owns cmd+F (avoids two publishers of \.yeetFind colliding).
+        .focusedSceneValue(\.yeetFind, tab == .memories ? nil : {
+            if supportsFind {
+                find.reset()
+                find.isPresented = true
+            }
+        })
+        .onChange(of: tab) { _, _ in
+            find.isPresented = false
+            find.query = ""
+            find.reset()
+        }
         .onChange(of: focus) { old, new in
             // Flush + record when leaving a field (only meaningful while editable).
             if editable, old != nil, old != new { flush(record: true) }
@@ -388,15 +497,42 @@ private struct PromptEditorPane: View {
 
     // MARK: Tabs
 
+    // Display binding for the Initial/Clarified segmented control. On the Memories
+    // tab there is no matching segment, so clamp the display to .initial (avoids the
+    // "Picker: selection invalid" warning + blank control); the Memories button shows
+    // the active tint instead.
+    private var segmentedTab: Binding<Tab> {
+        Binding(get: { tab == .memories ? .initial : tab }, set: { tab = $0 })
+    }
+
     private var tabBar: some View {
         HStack(spacing: 12) {
-            Picker("", selection: $tab) {
+            Picker("", selection: segmentedTab) {
                 Text("Initial").tag(Tab.initial)
                 if clarifiedAvailable { Text("Clarified").tag(Tab.clarified) }
             }
             .pickerStyle(.segmented)
             .fixedSize()
             .labelsHidden()
+            // Memories tab. Plain click switches inline; ⌘-click pops it out into its
+            // own window, handing off the current selection + expansion.
+            Button {
+                if NSEvent.modifierFlags.contains(.command) {
+                    openWindow(value: PromptMemoriesWindowID(
+                        memoryRootURL: memoryRootURL,
+                        promptName: entry.name,
+                        selectedFile: memoriesModel.selectedFile,
+                        expanded: Array(memoriesModel.expanded)
+                    ))
+                } else {
+                    tab = .memories
+                }
+            } label: {
+                Label("Memories", systemImage: "folder")
+            }
+            .buttonStyle(.bordered)
+            .tint(tab == .memories ? .accentColor : nil)
+            .help("Memory file explorer — \u{2318}-click to open in a separate window")
             if tab == .initial && !editable {
                 Label("Read-only", systemImage: "lock.fill")
                     .font(.caption).foregroundStyle(.secondary)
@@ -408,36 +544,69 @@ private struct PromptEditorPane: View {
     }
 
     private var initialTab: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                sectionEditor("Backstory", field: .backstory, text: $backstory,
-                              minHeight: 90, hint: "Narrative context (inherited from the session).")
-                sectionEditor("Goal", field: .goal, text: $goal,
-                              minHeight: 120, hint: "The outcome / acceptance criteria.")
-                sectionEditor("Detail", field: .detail, text: $detail,
-                              minHeight: 220, hint: "The approach, constraints, specifics.")
+        ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+                if find.isPresented && supportsFind {
+                    FindBar(find: find, total: findMatches.total,
+                            onStep: { stepFind($0, proxy: proxy) })
+                }
+                ScrollView {
+                    VStack(spacing: 16) {
+                        sectionEditor("Backstory", field: .backstory, text: $backstory,
+                                      minHeight: 90, hint: "Narrative context (inherited from the session).")
+                        sectionEditor("Goal", field: .goal, text: $goal,
+                                      minHeight: 120, hint: "The outcome / acceptance criteria.")
+                        sectionEditor("Detail", field: .detail, text: $detail,
+                                      minHeight: 220, hint: "The approach, constraints, specifics.")
+                    }
+                    .padding(20)
+                    .frame(maxWidth: 900, alignment: .leading)
+                    .frame(maxWidth: .infinity)
+                }
             }
-            .padding(20)
-            .frame(maxWidth: 900, alignment: .leading)
-            .frame(maxWidth: .infinity)
+            .focusedSceneValue(\.yeetFindNext, readOnlyStep(+1, proxy: proxy))
+            .focusedSceneValue(\.yeetFindPrev, readOnlyStep(-1, proxy: proxy))
         }
+    }
+
+    // cmd+G / cmd+shift+G for the read-only find bar — nil (menu greyed) unless the
+    // bar is open with at least one match.
+    private func readOnlyStep(_ delta: Int, proxy: ScrollViewProxy) -> (() -> Void)? {
+        guard find.isPresented, supportsFind, findMatches.total > 0 else { return nil }
+        return { stepFind(delta, proxy: proxy) }
+    }
+
+    private var memoriesTab: some View {
+        MemoriesExplorer(rootURL: memoryRootURL, model: memoriesModel)
     }
 
     @ViewBuilder
     private var clarifiedTab: some View {
         if let c = clarified {
-            ScrollView {
-                VStack(spacing: 16) {
-                    if !c.backstory.isEmpty { readOnlyCard("Backstory", c.backstory) }
-                    readOnlyCard("Refined Goal", c.refinedGoal)
-                    readOnlyCard("Refined Detail", c.refinedDetail)
-                    qaCard("Goal Clarifications", c.goalClarifications)
-                    qaCard("Detail Clarifications", c.detailClarifications)
-                    if !c.constraints.isEmpty { bulletsCard("Constraints", c.constraints) }
+            ScrollViewReader { proxy in
+                VStack(spacing: 0) {
+                    if find.isPresented && supportsFind {
+                        FindBar(find: find, total: findMatches.total,
+                                onStep: { stepFind($0, proxy: proxy) })
+                    }
+                    ScrollView {
+                        VStack(spacing: 16) {
+                            if !c.backstory.isEmpty {
+                                readOnlyCard("Backstory", c.backstory, segmentID: "c-backstory")
+                            }
+                            readOnlyCard("Refined Goal", c.refinedGoal, segmentID: "c-goal")
+                            readOnlyCard("Refined Detail", c.refinedDetail, segmentID: "c-detail")
+                            qaCard("Goal Clarifications", c.goalClarifications)
+                            qaCard("Detail Clarifications", c.detailClarifications)
+                            if !c.constraints.isEmpty { bulletsCard("Constraints", c.constraints) }
+                        }
+                        .padding(20)
+                        .frame(maxWidth: 900, alignment: .leading)
+                        .frame(maxWidth: .infinity)
+                    }
                 }
-                .padding(20)
-                .frame(maxWidth: 900, alignment: .leading)
-                .frame(maxWidth: .infinity)
+                .focusedSceneValue(\.yeetFindNext, readOnlyStep(+1, proxy: proxy))
+                .focusedSceneValue(\.yeetFindPrev, readOnlyStep(-1, proxy: proxy))
             }
         } else {
             ContentUnavailableView("No Clarified Prompt", systemImage: "questionmark.circle",
@@ -469,23 +638,25 @@ private struct PromptEditorPane: View {
                     .font(.caption2.monospaced()).foregroundStyle(.tertiary)
             }
             if editable {
-                TextEditor(text: text)
-                    .font(.system(.body, design: .monospaced))
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .frame(minHeight: minHeight)
+                // SwiftUI-native editor with live markdown header highlighting + a
+                // line-number gutter. cmd+F routes to the inline find-in-page bar, which
+                // selects the active match inside the editor.
+                MarkdownSourceEditor(text: text, minHeight: minHeight,
+                                     query: findQuery,
+                                     activeOccurrence: activeLocal(segmentID(field)))
                     .background(.black.opacity(0.04), in: .rect(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
-                    .focused($focus, equals: field)
+                    .id(segmentID(field))
                     .onChange(of: text.wrappedValue) { _, _ in scheduleSave() }
             } else {
-                Text(text.wrappedValue.isEmpty ? "—" : text.wrappedValue)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
+                HighlightedText(source: text.wrappedValue.isEmpty ? "—" : text.wrappedValue,
+                                query: findQuery,
+                                activeLocalOccurrence: activeLocal(segmentID(field)))
                     .padding(8)
                     .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
                     .background(.black.opacity(0.04), in: .rect(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
+                    .id(segmentID(field))
             }
             Text(hint).font(.caption2).foregroundStyle(.tertiary)
         }
@@ -496,13 +667,22 @@ private struct PromptEditorPane: View {
 
     // MARK: Read-only cards (clarified)
 
-    private func readOnlyCard(_ title: String, _ body: String) -> some View {
+    private func readOnlyCard(_ title: String, _ body: String, segmentID: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             copyHeader(title, copyText: body)
-            Text(body.isEmpty ? "—" : body)
-                .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Group {
+                if let segmentID {
+                    HighlightedText(source: body.isEmpty ? "—" : body,
+                                    query: findQuery,
+                                    activeLocalOccurrence: activeLocal(segmentID))
+                        .id(segmentID)
+                } else {
+                    Text(body.isEmpty ? "—" : body)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
