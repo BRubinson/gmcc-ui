@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // Single source of truth for the in-editor markdown header look — the purplish hue and
 // the per-level font sizes. Mirrors the size *relationship* of
@@ -62,5 +63,36 @@ enum MarkdownHeaderStyle {
     /// Used to estimate the no-wrap content width for horizontal scrolling.
     static func charWidth(forLevel level: Int?) -> CGFloat {
         size(forLevel: level) * 0.62
+    }
+
+    /// The SwiftUI font for a whole line at the given (optional) heading level —
+    /// the level's bold heading font, or the body font for a non-heading line.
+    static func lineFont(forLevel level: Int?) -> Font {
+        level.map(font(level:)) ?? bodyFont
+    }
+
+    /// Insets that approximate SwiftUI `TextEditor`'s internal text-container
+    /// padding on macOS. The per-line editor mirrors these on its hidden sizing
+    /// `Text` so the measured (wrapped) height matches the editor's own layout.
+    /// Tune here if per-line rows clip or leave slack.
+    static let editorInsetH: CGFloat = 5
+    static let editorInsetV: CGFloat = 3
+
+    // MARK: - AppKit equivalents
+
+    // The NSTextView-backed editor styles its NSTextStorage with AppKit fonts/colors;
+    // these mirror the SwiftUI values above so both render the same look.
+
+    /// Purplish header color as an NSColor (matches `color`).
+    static var nsHeaderColor: NSColor { NSColor(srgbRed: 0.58, green: 0.36, blue: 0.92, alpha: 1) }
+
+    /// Adaptive body text color (matches `bodyColor` == .primary).
+    static var nsBodyColor: NSColor { .labelColor }
+
+    /// Monospaced font for a whole line at the given (optional) heading level — bold
+    /// heading font, or the regular body font for a non-heading line.
+    static func nsFont(forLevel level: Int?) -> NSFont {
+        NSFont.monospacedSystemFont(ofSize: size(forLevel: level),
+                                    weight: level != nil ? .bold : .regular)
     }
 }
