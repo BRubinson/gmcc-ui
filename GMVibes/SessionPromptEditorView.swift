@@ -271,6 +271,7 @@ private struct PromptStatusBadge: View {
 
 private struct PromptEditorPane: View {
     @Environment(GMCCFileSystemEmulation.self) private var fs
+    @Environment(GMCCEnvironment.self) private var gmcc
     let entry: GMCCPromptFilesEntry
     let sessionDirURL: URL
     let sessionUUID: UUID
@@ -287,6 +288,12 @@ private struct PromptEditorPane: View {
     @State private var promptFolderURL: URL?
     @State private var kbitesLoaded: [String] = []
     @State private var kbiteContextSummary: String?
+    // KBite registry pill box: the prompt's authoritative `kbite:` list (mirrored
+    // into kbitesLoaded), the installed-kbite options, and the data-file URL we
+    // rewrite on toggle.
+    @State private var selectedKbites: [String] = []
+    @State private var availableKbites: [String] = []
+    @State private var promptDataURL: URL?
     @State private var clarified: GMCCClarifiedPromptFile?
     @State private var tab: Tab = .initial
     @State private var lastSaved = PromptEditHistory.EditState(backstory: "", goal: "", detail: "")
@@ -344,6 +351,7 @@ private struct PromptEditorPane: View {
         let initialURL: URL
         let initial: GMCCInitialPromptFile
         let clarified: GMCCClarifiedPromptFile?
+        let kbite: [String]   // the data file's authoritative kbite registry
     }
 
     // MARK: Find-in-page (read-only content)
@@ -486,6 +494,9 @@ private struct PromptEditorPane: View {
             // Flush + record when leaving a field (only meaningful while editable).
             if editable, old != nil, old != new { flush(record: true) }
         }
+        // KBite registry edits persist immediately, in any prompt status. The
+        // `loaded` guard in saveKbites() ignores the seed assignment in load().
+        .onChange(of: selectedKbites) { _, _ in saveKbites() }
         .onDisappear {
             saveTask?.cancel()
             // Synchronous on the close/switch path: a detached write can be
@@ -552,6 +563,7 @@ private struct PromptEditorPane: View {
                 }
                 ScrollView {
                     VStack(spacing: 16) {
+                        KBitePillBox(available: availableKbites, selected: $selectedKbites)
                         sectionEditor("Backstory", field: .backstory, text: $backstory,
                                       minHeight: 90, hint: "Narrative context (inherited from the session).")
                         sectionEditor("Goal", field: .goal, text: $goal,
@@ -773,18 +785,24 @@ private struct PromptEditorPane: View {
                 let cURL = folder.appendingPathComponent(data.clarifiedPromptPath)
                 clar = try? GMCCRuntimeDecoder.decodeClarifiedPrompt(at: cURL)
             }
-            return Loaded(folderURL: folder, initialURL: iURL, initial: initial, clarified: clar)
+            return Loaded(folderURL: folder, initialURL: iURL, initial: initial,
+                          clarified: clar, kbite: data.kbite)
         }.value
 
         guard let r = result else { return }
         backstory = r.initial.backstory
         goal = r.initial.goal
         detail = r.initial.detail
-        kbitesLoaded = r.initial.kbitesLoaded
+        // The data-file `kbite:` registry is authoritative; mirror it into the
+        // initial.yaml's kbites_loaded so the two stay in sync.
+        selectedKbites = r.kbite
+        kbitesLoaded = r.kbite
         kbiteContextSummary = r.initial.kbiteContextSummary
         initialURL = r.initialURL
+        promptDataURL = dataURL
         promptFolderURL = r.folderURL
         clarified = r.clarified
+        loadAvailableKbites()
         let s = currentState()
         lastSaved = s
         history.load(promptKey: promptKey, current: s)
@@ -844,6 +862,41 @@ private struct PromptEditorPane: View {
         } else {
             Task.detached(priority: .userInitiated) { write() }
         }
+    }
+
+    // MARK: KBites
+
+    // Installed kbites under $GMCC_KBITE_DIGESTED, unioned with the current
+    // selection so an already-active kbite missing from disk still renders (and
+    // can be deselected). Same scan as CreatePromptView.loadKbites().
+    private func loadAvailableKbites() {
+        var names: [String] = []
+        if let digested = gmcc[.kbiteDigested] {
+            let dir = URL(fileURLWithPath: digested, isDirectory: true)
+            let contents = (try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            )) ?? []
+            names = contents.compactMap { url in
+                let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                return isDir ? url.lastPathComponent : nil
+            }
+        }
+        availableKbites = Set(names).union(selectedKbites).sorted()
+    }
+
+    // Persist a pill toggle: write the registry to the data file AND mirror it into
+    // initial.yaml's kbites_loaded. Synchronous on the main thread (the writes are
+    // nonisolated + fast, and a toggle is a discrete action) so the change can't be
+    // abandoned if the app terminates. Guarded on `loaded` so seeding selection in
+    // load() doesn't trigger a spurious write.
+    private func saveKbites() {
+        guard loaded, let iURL = initialURL, let dURL = promptDataURL else { return }
+        kbitesLoaded = selectedKbites
+        try? GMCCRuntimeEncoder.writeInitialPromptFile(
+            at: iURL, backstory: backstory, goal: goal, detail: detail,
+            kbitesLoaded: selectedKbites, kbiteContextSummary: kbiteContextSummary
+        )
+        try? GMCCRuntimeEncoder.updatePromptDataKbite(at: dURL, kbite: selectedKbites)
     }
 
     // MARK: Undo / redo

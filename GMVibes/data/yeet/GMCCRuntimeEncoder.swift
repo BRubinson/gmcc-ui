@@ -135,6 +135,46 @@ nonisolated enum GMCCRuntimeEncoder {
         try writeAtomicReplace(render(lines), to: initialURL)
     }
 
+    /// Updates the `kbite:` registry of an existing {id}_{name}_data.gmcc.yaml in
+    /// place and bumps `updated_time:`, leaving every other line — including ones
+    /// the runtime model doesn't capture, like `version:` — byte-for-byte intact.
+    /// Field-targeted line surgery (same approach as `appendListEntry`) rather than
+    /// a full re-encode, then an atomic .tmp-replace so the 1s read loop never sees
+    /// a partial file. Used by the prompt editor's kbite pill box.
+    static func updatePromptDataKbite(at dataURL: URL, kbite: [String]) throws {
+        let original: String
+        do {
+            original = try String(contentsOf: dataURL, encoding: .utf8)
+        } catch {
+            throw GMCCEncodeError.writeFailed(dataURL, "read for kbite update failed: \(error.localizedDescription)")
+        }
+        var lines = original.components(separatedBy: "\n")
+        if lines.last == "" { lines.removeLast() }   // files end in "\n"
+
+        // 1. Replace the kbite block: either the `kbite: []` sentinel or a `kbite:`
+        //    line followed by its indented `  - …` items. Stop at the first blank
+        //    or column-0 line so surrounding gaps and other keys are untouched.
+        var kbiteIdx: Int? = lines.firstIndex(of: "kbite: []")
+        if kbiteIdx == nil { kbiteIdx = lines.firstIndex(of: "kbite:") }
+        if let start = kbiteIdx {
+            var end = start
+            var i = start + 1
+            while i < lines.count, lines[i].hasPrefix(" ") {
+                end = i
+                i += 1
+            }
+            lines.replaceSubrange(start...end, with: kbiteBlock(kbite))
+        }
+        // (kbite key absent → malformed data file; leave it untouched rather than guess.)
+
+        // 2. Bump updated_time.
+        if let idx = lines.firstIndex(where: { $0.hasPrefix("updated_time:") }) {
+            lines[idx] = scalar("updated_time", iso8601Now())
+        }
+
+        try writeAtomicReplace(lines.joined(separator: "\n") + "\n", to: dataURL)
+    }
+
     /// Stamps sessions/{slug}/session_data.gmcc.yaml (+ prompts/ subdir) with the
     /// given instance/project back-references, then appends a session entry to the
     /// parent instance_data.gmcc.yaml's sessions[] list. Returns the session dir URL.
