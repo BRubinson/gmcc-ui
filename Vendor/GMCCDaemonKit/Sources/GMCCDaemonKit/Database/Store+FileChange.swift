@@ -67,11 +67,19 @@ extension Store {
         }
     }
 
+    /// nil sessionUuid means no session filter (whole-db query); a
+    /// supplied-but-unknown uuid is a typed NOT_FOUND, never a silent empty
+    /// list (the same optional-filter contract as Store+Listing).
     public func listFileChanges(_ req: FileChangeListRequest) throws -> FileChangeListResponse {
         try dbQueue.read { db in
             var conditions: [String] = []
             var arguments: [(any DatabaseValueConvertible)?] = []
             if let sessionUuid = req.sessionUuid {
+                guard try Row.fetchOne(
+                    db, sql: "SELECT 1 FROM session WHERE uuid = ?", arguments: [sessionUuid]
+                ) != nil else {
+                    throw StoreError.notFound(entity: "session", key: sessionUuid)
+                }
                 conditions.append("fc.session_uuid = ?")
                 arguments.append(sessionUuid)
             }

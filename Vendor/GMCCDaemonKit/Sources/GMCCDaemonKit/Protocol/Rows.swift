@@ -258,17 +258,39 @@ public struct PromptRow: Codable, Hashable, Sendable {
 }
 
 /// Lightweight prompt listing shape (replaces reading the session_data
-/// prompts: list).
+/// prompts: list). Carries its parent session uuid so whole-db listings
+/// (PROMPT_LIST with no session filter) stay interpretable — seq is only
+/// unique per session.
 public struct PromptStub: Codable, Hashable, Sendable {
     public let uuid: String
+    public let sessionUuid: String
     public let seq: Int64
     public let code: String
     public let name: String
     public let status: String
     public let version: Int64
 
-    public init(uuid: String, seq: Int64, code: String, name: String, status: String, version: Int64) {
+    private enum CodingKeys: String, CodingKey {
+        case uuid
+        case sessionUuid = "session_uuid"
+        case seq
+        case code
+        case name
+        case status
+        case version
+    }
+
+    public init(
+        uuid: String,
+        sessionUuid: String,
+        seq: Int64,
+        code: String,
+        name: String,
+        status: String,
+        version: Int64
+    ) {
         self.uuid = uuid
+        self.sessionUuid = sessionUuid
         self.seq = seq
         self.code = code
         self.name = name

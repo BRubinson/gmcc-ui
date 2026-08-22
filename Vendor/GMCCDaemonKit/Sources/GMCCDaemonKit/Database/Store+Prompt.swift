@@ -55,9 +55,19 @@ extension Store {
         }
     }
 
+    /// nil sessionUuid lists every prompt in the db; a supplied-but-unknown
+    /// uuid is a typed NOT_FOUND, never a silent empty list (the same
+    /// optional-filter contract as Store+Listing).
     public func listPrompts(_ req: PromptListRequest) throws -> PromptListResponse {
         try dbQueue.read { db in
-            PromptListResponse(prompts: try self.fetchPromptStubs(db, sessionUuid: req.sessionUuid))
+            if let sessionUuid = req.sessionUuid {
+                guard try Row.fetchOne(
+                    db, sql: "SELECT 1 FROM session WHERE uuid = ?", arguments: [sessionUuid]
+                ) != nil else {
+                    throw StoreError.notFound(entity: "session", key: sessionUuid)
+                }
+            }
+            return PromptListResponse(prompts: try self.fetchPromptStubs(db, sessionUuid: req.sessionUuid))
         }
     }
 

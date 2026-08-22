@@ -69,17 +69,28 @@ extension Store {
         )
     }
 
-    func fetchPromptStubs(_ db: Database, sessionUuid: String) throws -> [PromptStub] {
-        try Row.fetchAll(
-            db,
-            sql: """
-                SELECT uuid, seq, code, name, status, version
+    /// nil sessionUuid = every prompt in the db, grouped by session (seq is
+    /// only unique per session, hence the two-column ORDER BY).
+    func fetchPromptStubs(_ db: Database, sessionUuid: String?) throws -> [PromptStub] {
+        let sql: String
+        let arguments: StatementArguments
+        if let sessionUuid {
+            sql = """
+                SELECT uuid, session_uuid, seq, code, name, status, version
                 FROM prompt WHERE session_uuid = ? ORDER BY seq
-                """,
-            arguments: [sessionUuid]
-        ).map { row in
+                """
+            arguments = [sessionUuid]
+        } else {
+            sql = """
+                SELECT uuid, session_uuid, seq, code, name, status, version
+                FROM prompt ORDER BY session_uuid, seq
+                """
+            arguments = []
+        }
+        return try Row.fetchAll(db, sql: sql, arguments: arguments).map { row in
             PromptStub(
                 uuid: row["uuid"],
+                sessionUuid: row["session_uuid"],
                 seq: row["seq"],
                 code: row["code"],
                 name: row["name"],

@@ -729,14 +729,18 @@ public struct PromptCreateRequest: Codable, Hashable, Sendable {
     }
 }
 
+/// `sessionUuid` is an optional filter (same contract as INSTANCE_LIST /
+/// SESSION_LIST): nil lists every prompt in the db (stubs carry their parent
+/// session uuid); a supplied-but-unknown uuid is NOT_FOUND, never a silent
+/// empty list.
 public struct PromptListRequest: Codable, Hashable, Sendable {
-    public let sessionUuid: String
+    public let sessionUuid: String?
 
     private enum CodingKeys: String, CodingKey {
         case sessionUuid = "session_uuid"
     }
 
-    public init(sessionUuid: String) {
+    public init(sessionUuid: String? = nil) {
         self.sessionUuid = sessionUuid
     }
 }
