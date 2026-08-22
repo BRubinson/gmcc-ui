@@ -2,14 +2,14 @@ import SwiftUI
 
 // CodeEdit-style file explorer over a prompt's memory/ folder: a recursive
 // navigator on the left, a block-markdown / find-in-page reader on the right. Backed
-// by GMCCFileSystemEmulation.fileTrees (polled), so files an architect agent writes
+// by FileTreeStore.fileTrees (polled), so files an architect agent writes
 // mid-session appear live. The same view is hosted both inline (Memories tab) and in
 // the CMD-click popout window — selection/expansion live in MemoriesExplorerModel.
 struct MemoriesExplorer: View {
     let rootURL: URL
     @Bindable var model: MemoriesExplorerModel
 
-    @Environment(GMCCFileSystemEmulation.self) private var fs
+    @Environment(FileTreeStore.self) private var fs
 
     private var tree: FileTreeNode? { fs.fileTrees[rootURL] }
 
@@ -200,7 +200,7 @@ private struct MemoriesReader: View {
             find.reset()
             loaded = false
             let raw = await Task.detached(priority: .userInitiated) {
-                GMCCFileSystemEmulation.readRawFile(at: url)
+                FileTreeStore.readRawFile(at: url)
             }.value
             source = raw
             isMarkdown = url.pathExtension.lowercased() == "md"

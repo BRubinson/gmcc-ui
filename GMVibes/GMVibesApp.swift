@@ -3,14 +3,16 @@ import SwiftData
 
 @main
 struct GMVibesApp: App {
-    @State private var gmccEnvironment = GMCCEnvironment()
-    @State private var fileSystem = GMCCFileSystemEmulation.shared
+    // Bounded flush of dirty prompt edits on quit (replaces the old
+    // synchronous main-thread write in onDisappear).
+    @NSApplicationDelegateAdaptor(GMVibesAppDelegate.self) private var appDelegate
+    @State private var services = GMVibesServices()
 
     var body: some Scene {
         // Primary launcher (singleton).
         Window("GM Vibes", id: "landing") {
             LandingView()
-                .gmccEnv(gmccEnvironment, fileSystem)
+                .gmccEnv(services)
         }
         .windowResizability(.contentMinSize)
         .commands {
@@ -21,24 +23,24 @@ struct GMVibesApp: App {
         // focuses the existing one). Projects is a group so multiples can open.
         Window("Yeet Viewer", id: "yeet-viewer") {
             YeetViewerScene()
-                .gmccEnv(gmccEnvironment, fileSystem)
+                .gmccEnv(services)
         }
 
         Window("Knowledge Bites", id: "kbites") {
             KBitesScene()
-                .gmccEnv(gmccEnvironment, fileSystem)
+                .gmccEnv(services)
         }
 
         WindowGroup("Projects", id: "projects") {
             ProjectsScene()
-                .gmccEnv(gmccEnvironment, fileSystem)
+                .gmccEnv(services)
         }
 
         // One window per session (keyed on SessionWindowID.sessionUUID).
         WindowGroup(for: SessionWindowID.self) { $windowID in
             if let windowID {
                 SessionTodoView(windowID: windowID)
-                    .gmccEnv(gmccEnvironment, fileSystem)
+                    .gmccEnv(services)
                     .modelContainer(PromptHistoryStore.container)
             } else {
                 Text("No session")
@@ -47,17 +49,18 @@ struct GMVibesApp: App {
             }
         }
 
-        // Per-file KBite markdown window (unchanged).
+        // Per-file KBite markdown window.
         WindowGroup("KBite File", id: "kbite-md", for: URL.self) { $url in
             KBiteMarkdownWindowView(url: url)
+                .gmccEnv(services)
         }
 
         // Popped-out Memories explorer (one per prompt's memory folder). MUST inject
-        // .gmccEnv — the explorer reads GMCCFileSystemEmulation for the polled file
+        // .gmccEnv — the explorer reads FileTreeStore for the polled file
         // tree, so without it the window would crash on a missing environment object.
         WindowGroup("Prompt Memories", id: "prompt-memories", for: PromptMemoriesWindowID.self) { $windowID in
             PromptMemoriesWindow(windowID: windowID)
-                .gmccEnv(gmccEnvironment, fileSystem)
+                .gmccEnv(services)
         }
     }
 }
@@ -80,14 +83,5 @@ struct YeetFindCommands: Commands {
                 .keyboardShortcut("g", modifiers: [.command, .shift])
                 .disabled(findPrev == nil)
         }
-    }
-}
-
-// Inject the shared GMCC singletons into a scene's root view in one call.
-extension View {
-    func gmccEnv(_ env: GMCCEnvironment, _ fs: GMCCFileSystemEmulation) -> some View {
-        self
-            .environment(env)
-            .environment(fs)
     }
 }

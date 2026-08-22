@@ -1,15 +1,15 @@
 import Foundation
 import Observation
+import GMCCDaemonKit
 
 /// One project surfaced in the landing screen's Recent Projects column, broken out
 /// into its instances (each carrying its own newest-first sessions). Ranked by the
 /// newest session across all of the project's instances.
 struct RecentProject: Identifiable, Equatable {
-    let project: GMCCProjectEntry
+    let id: UUID
+    let name: String
     let recency: Date
     let instances: [RecentInstance]
-
-    var id: UUID { project.id }
 }
 
 /// One instance within a recent project — preserves per-instance identity
@@ -28,112 +28,105 @@ struct RecentSession: Identifiable, Equatable {
     let name: String
     let code: String
     let branch: String?
+    let created: Date
     let updated: Date
 
     var id: UUID { windowID.sessionUUID }
+
+    func date(for key: SessionSortKey) -> Date {
+        key == .created ? created : updated
+    }
 }
 
-/// Read-only derivation of "recent projects + their newest sessions" over the shared
-/// GMCCFileSystemEmulation snapshots. Owns no persisted state and never mutates the
-/// singleton — it only calls the existing async refresh APIs to warm the caches, then
-/// derives a sorted view model. Page-driven: the landing view runs `loop` via `.task`
-/// so it only ticks while visible.
+/// Global landing-surface ordering for sessions (and project recency ranking).
+/// String raw values so the choice round-trips through @AppStorage.
+enum SessionSortKey: String, CaseIterable {
+    case created
+    case updated
+
+    var label: String {
+        switch self {
+        case .created: return "Created"
+        case .updated: return "Updated"
+        }
+    }
+}
+
+/// Read-only derivation of "recent projects + their newest sessions" over the
+/// CatalogStore's daemon-backed snapshot. Owns no persisted state and issues no
+/// I/O — the landing view refreshes the catalog (event-driven) and re-derives.
 @Observable
 @MainActor
 final class RecentsModel {
     private(set) var recents: [RecentProject] = []
 
-    /// Cache parsed ISO-8601 timestamps so the refresh loop doesn't re-parse the
-    /// whole tree every tick.
+    /// Cache parsed ISO-8601 timestamps so re-derivation doesn't re-parse the
+    /// whole tree every event.
     private var dateCache: [String: Date] = [:]
     private static let isoFormatter = ISO8601DateFormatter()
 
     private let projectLimit: Int
-    private let sessionLimit: Int
 
-    init(projectLimit: Int = 5, sessionLimit: Int = 3) {
+    init(projectLimit: Int = 5) {
         self.projectLimit = projectLimit
-        self.sessionLimit = sessionLimit
     }
 
-    /// Visible-only refresh loop. A 2s cadence keeps the full-tree prefetch cheap
-    /// while still reflecting external edits promptly.
-    func loop(fs: GMCCFileSystemEmulation, gmcc: GMCCEnvironment) async {
-        while !Task.isCancelled {
-            await refresh(fs: fs, gmcc: gmcc)
-            try? await Task.sleep(for: .seconds(2))
-        }
-    }
-
-    func refresh(fs: GMCCFileSystemEmulation, gmcc: GMCCEnvironment) async {
-        guard let rootPath = gmcc[.projects], !rootPath.isEmpty else {
-            recents = []
-            return
-        }
-        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
-        await fs.refreshProjectIndex(rootDirectory: rootURL)
-        guard let index = fs.projectIndex else {
-            recents = []
-            return
-        }
-
-        // Warm project_data for each project, then instance_data for each instance.
-        for project in index.projects {
-            await fs.refreshProjectData(uuid: project.id, at: project.projectDataURL)
-            for instance in fs.projectData[project.id]?.instances ?? [] {
-                await fs.refreshInstanceData(uuid: instance.id, at: instance.instanceDataURL)
-            }
-        }
-
+    func refresh(catalog: CatalogStore, gmcc: GMCCEnvironment, sortKey: SessionSortKey = .created) {
         // Derive: per project, one section per instance (carrying RepName +
-        // systemPath), each with its own newest M sessions. Rank projects by the
-        // newest session across their instances; keep top N projects.
+        // systemPath), each with ALL of its sessions ordered by the global sort
+        // key (the card paginates the display). Rank projects by the newest
+        // session — same key — across their instances; keep top N projects.
         var derived: [RecentProject] = []
-        for project in index.projects {
-            guard let pdata = fs.projectData[project.id] else { continue }
+        for project in catalog.projects {
+            // A malformed uuid must skip the row, never mint a random identity
+            // (a fabricated uuid opens a dead window and churns SwiftUI ids).
+            guard let projectUUID = UUID(uuidString: project.uuid) else { continue }
             var instances: [RecentInstance] = []
-            for instance in pdata.instances {
-                guard let idata = fs.instanceData[instance.id] else { continue }
+            for instance in catalog.instancesByProject[project.uuid] ?? [] {
+                guard let instanceUUID = UUID(uuidString: instance.uuid) else { continue }
                 var sessions: [RecentSession] = []
-                for session in idata.sessions {
+                for stub in catalog.sessionsByInstance[instance.uuid] ?? [] {
+                    guard let sessionUUID = UUID(uuidString: stub.uuid) else { continue }
                     sessions.append(RecentSession(
                         windowID: SessionWindowID(
-                            sessionUUID: session.id,
-                            instanceUUID: instance.id,
-                            sessionName: session.base.name,
-                            promptsDirURL: session.promptsDirectoryURL
+                            sessionUUID: sessionUUID,
+                            instanceUUID: instanceUUID,
+                            sessionName: stub.name
                         ),
-                        name: session.base.name,
-                        code: session.base.code,
-                        branch: session.branch,
-                        updated: parse(session.base.updatedTime)
+                        name: stub.name,
+                        code: stub.code,
+                        branch: CkfsPathResolver.unslugBranch(stub.code),
+                        created: parse(stub.createdAt),
+                        updated: parse(stub.updatedAt)
                     ))
                 }
                 // Hide instances with no sessions to show.
                 guard !sessions.isEmpty else { continue }
-                sessions.sort { $0.updated > $1.updated }
+                sessions.sort { $0.date(for: sortKey) > $1.date(for: sortKey) }
                 instances.append(RecentInstance(
-                    id: instance.id,
-                    instanceName: instance.base.name,
-                    code: instance.base.code,
-                    systemPath: instance.systemPath ?? idata.systemPath,
-                    repositoryName: pdata.repositoryName,
-                    sessions: Array(sessions.prefix(sessionLimit))
+                    id: instanceUUID,
+                    instanceName: instance.name,
+                    code: instance.code,
+                    systemPath: instance.absoluteFileSystemPath.isEmpty ? nil : instance.absoluteFileSystemPath,
+                    repositoryName: project.gitRepoName.isEmpty ? nil : project.gitRepoName,
+                    sessions: sessions
                 ))
             }
             // Only surface projects with at least one instance that has sessions.
             guard !instances.isEmpty else { continue }
             let recency = instances
-                .compactMap { $0.sessions.first?.updated }
+                .compactMap { $0.sessions.first?.date(for: sortKey) }
                 .max() ?? .distantPast
             derived.append(RecentProject(
-                project: project,
+                id: projectUUID,
+                name: project.name,
                 recency: recency,
                 instances: instances
             ))
         }
         derived.sort { $0.recency > $1.recency }
-        recents = Array(derived.prefix(projectLimit))
+        let top = Array(derived.prefix(projectLimit))
+        if recents != top { recents = top }
     }
 
     private func parse(_ raw: String) -> Date {

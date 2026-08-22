@@ -1,0 +1,62 @@
+import Foundation
+
+/// Per-domain multicast invalidation signals. A view's visibility-scoped
+/// `.task` awaits a domain stream instead of sleeping:
+///
+///     .task(id: key) {
+///         await store.refresh()
+///         for await _ in daemon.hub.stream(for: .topology) { await store.refresh() }
+///     }
+///
+/// Streams coalesce with `.bufferingNewest(1)` — a capped event replay can
+/// deliver thousands of events; subscribers must wake once, not N times.
+@MainActor
+final class InvalidationHub {
+    enum Domain: Hashable {
+        case topology
+        case session(String)
+        case prompt(String)
+        case changes
+        case kbites
+    }
+
+    private var continuations: [Domain: [UUID: AsyncStream<Void>.Continuation]] = [:]
+
+    func stream(for domain: Domain) -> AsyncStream<Void> {
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let token = UUID()
+            continuations[domain, default: [:]][token] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.continuations[domain]?[token] = nil
+                    // Prune empty buckets so per-session/per-prompt keys don't
+                    // accumulate for the life of the process.
+                    if self.continuations[domain]?.isEmpty == true {
+                        self.continuations[domain] = nil
+                    }
+                }
+            }
+        }
+    }
+
+    func invalidate(_ domain: Domain) {
+        continuations[domain]?.values.forEach { $0.yield() }
+    }
+
+    /// CREATE_PROMPT and FILE_CHANGE events carry no session uuid on the wire,
+    /// so they fan out to every open session observer, each of which re-queries.
+    func invalidateAllSessions() {
+        for (domain, conts) in continuations {
+            if case .session = domain {
+                conts.values.forEach { $0.yield() }
+            }
+        }
+    }
+
+    /// Resync barrier — fired when the connection comes (back) up, so visible
+    /// surfaces refetch once instead of trusting a possibly-gapped stream.
+    func invalidateAll() {
+        continuations.values.forEach { $0.values.forEach { $0.yield() } }
+    }
+}

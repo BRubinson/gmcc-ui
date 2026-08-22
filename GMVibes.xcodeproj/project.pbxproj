@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		1B4010A02FDCA09300DAF751 /* GMCCDaemonKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1B4010A22FDCA09300DAF751 /* GMCCDaemonKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		1B4010832FDCA09300DAF751 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1B4010A02FDCA09300DAF751 /* GMCCDaemonKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = GMVibes;
 			packageProductDependencies = (
+				1B4010A22FDCA09300DAF751 /* GMCCDaemonKit */,
 			);
 			productName = GMVibes;
 			productReference = 1B4010732FDCA09200DAF751 /* GMVibes.app */;
@@ -195,6 +201,9 @@
 			);
 			mainGroup = 1B40106A2FDCA09200DAF751;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				1B4010A12FDCA09300DAF751 /* XCLocalSwiftPackageReference "Vendor/GMCCDaemonKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1B4010742FDCA09200DAF751 /* Products */;
 			projectDirPath = "";
@@ -579,6 +588,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		1B4010A12FDCA09300DAF751 /* XCLocalSwiftPackageReference "Vendor/GMCCDaemonKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/GMCCDaemonKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		1B4010A22FDCA09300DAF751 /* GMCCDaemonKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GMCCDaemonKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 1B40106B2FDCA09200DAF751 /* Project object */;
 }

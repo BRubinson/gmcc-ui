@@ -1,88 +1,68 @@
 import SwiftUI
 import AppKit
+import GMCCDaemonKit
 
 // Per-session prompt-authoring screen. Left: a flat navigator of the session's
-// prompts (driven by session_data.gmcc.yaml's prompts[] index). Right: a three-
-// section code-style editor (backstory / goal / detail) over the selected prompt's
-// initial.yaml, with autosave, SwiftData-backed undo/redo, per-section copy, and a
-// toolbar "Run" button that exports the `/gm_bot {id}` resume command.
+// prompts (SESSION_GET / PROMPT_LIST stubs). Right: a three-section code-style
+// editor (backstory / goal / detail) over the selected prompt's daemon row, with
+// version-threaded autosave, SwiftData-backed undo/redo, per-section copy, and a
+// toolbar "Run" button that exports the `/gm_bot {seq}` resume command.
 
 struct SessionPromptEditorView: View {
-    @Environment(GMCCFileSystemEmulation.self) private var fs
+    @Environment(DaemonConnectionModel.self) private var daemon
+    @Environment(CatalogStore.self) private var catalog
     let windowID: SessionWindowID
 
-    @State private var selectedID: Int?
+    @State private var store: SessionStore
+    @State private var selectedUuid: String?
     @State private var didDefaultSelect = false
     @State private var showCreatePrompt = false
     // One list filter over both fields: name + content (all sections).
     @State private var promptQuery = ""
 
-    private var promptsDirURL: URL { windowID.promptsDirURL }
-    private var sessionDirURL: URL { promptsDirURL.deletingLastPathComponent() }
-    private var sessionDataURL: URL { sessionDirURL.appendingPathComponent("session_data.gmcc.yaml") }
-    // .../instances/{instance}/sessions/{slug}/prompts  →  up to the instance dir.
-    private var instanceDataURL: URL {
-        sessionDirURL.deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("instance_data.gmcc.yaml")
-    }
-    // …/instances/{instance}/sessions/{slug}  →  up to the project dir (drop {slug},
-    // "sessions", {instance}, "instances") for the parent project_data.gmcc.yaml.
-    private var projectDataURL: URL {
-        sessionDirURL
-            .deletingLastPathComponent().deletingLastPathComponent()   // → instance dir
-            .deletingLastPathComponent().deletingLastPathComponent()   // → project dir
-            .appendingPathComponent("project_data.gmcc.yaml")
+    init(windowID: SessionWindowID) {
+        self.windowID = windowID
+        _store = State(initialValue: SessionStore(sessionUuid: windowID.sessionUUID.wireString))
     }
 
-    private var session: GMCCSessionDataFile? { fs.sessionData[sessionDataURL] }
+    // Instance/project identity resolved from the catalog snapshot.
+    private var instanceRow: InstanceRow? {
+        catalog.instance(uuid: windowID.instanceUUID.wireString)
+    }
+    private var projectRow: ProjectRow? {
+        guard let instance = instanceRow else { return nil }
+        return catalog.projects.first { $0.uuid == instance.projectUuid }
+    }
+
     // Newest first — "default newest" selection + natural authoring order.
-    private var prompts: [GMCCPromptFilesEntry] {
-        (session?.prompts ?? []).sorted { $0.promptID > $1.promptID }
-    }
-    private var selectedEntry: GMCCPromptFilesEntry? {
-        prompts.first { $0.promptID == selectedID }
-    }
+    private var prompts: [PromptStub] { store.prompts }
+    private var selectedStub: PromptStub? { prompts.first { $0.uuid == selectedUuid } }
     // Tokenized list filter: a prompt matches if its name OR prefetched
     // backstory/goal/detail contains ANY space-separated term in the query.
-    private func dataURL(for entry: GMCCPromptFilesEntry) -> URL {
-        sessionDirURL.appendingPathComponent(entry.path)
-    }
-    private var filteredPrompts: [GMCCPromptFilesEntry] {
+    private var filteredPrompts: [PromptStub] {
         let q = SearchQuery(promptQuery)
         guard q.isActive else { return prompts }
-        return prompts.filter { entry in
-            // One bar over both fields: name (+ id) and content (all sections).
-            var fields = [entry.name, String(entry.promptID)]
-            if let initial = fs.promptInitials[dataURL(for: entry)] {
-                fields.append(contentsOf: [initial.backstory, initial.goal, initial.detail])
+        return prompts.filter { stub in
+            var fields = [stub.name, String(stub.seq)]
+            if let detail = store.promptDetails[stub.uuid]?.prompt {
+                fields.append(contentsOf: [detail.backstory, detail.goal, detail.detail])
             }
             return q.matchesAny(fields)
         }
-    }
-    private var instanceName: String {
-        fs.instanceData[windowID.instanceUUID]?.base.name ?? "—"
-    }
-    // The instance's on-disk checkout (instance_data's system_path).
-    private var systemPath: String? {
-        fs.instanceData[windowID.instanceUUID]?.systemPath
-    }
-    // RepName from the parent project_data (looked up via the instance's projectUUID).
-    private var repositoryName: String? {
-        guard let pid = fs.instanceData[windowID.instanceUUID]?.projectUUID else { return nil }
-        return fs.projectData[pid]?.repositoryName
     }
 
     var body: some View {
         NavigationSplitView {
             PromptNavigator(
                 sessionName: windowID.sessionName,
-                instanceName: instanceName,
+                instanceName: instanceRow?.name ?? "—",
                 instanceUUID: windowID.instanceUUID,
-                repositoryName: repositoryName,
-                systemPath: systemPath,
+                repositoryName: projectRow?.gitRepoName,
+                systemPath: instanceRow.map(\.absoluteFileSystemPath),
+                changeSummary: store.changeSummary,
                 prompts: filteredPrompts,
                 query: $promptQuery,
-                selectedID: $selectedID
+                selectedUuid: $selectedUuid
             )
             .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
             .toolbar {
@@ -90,20 +70,25 @@ struct SessionPromptEditorView: View {
                     Button { showCreatePrompt = true } label: {
                         Label("New Prompt", systemImage: "plus")
                     }
-                    .disabled(session == nil)
+                    .disabled(store.session == nil)
                     .help("Create a new prompt in this session")
                 }
             }
         } detail: {
-            if let entry = selectedEntry {
+            if let stub = selectedStub {
                 PromptEditorPane(
-                    entry: entry,
-                    sessionDirURL: sessionDirURL,
-                    sessionUUID: windowID.sessionUUID,
-                    instanceUUID: windowID.instanceUUID
+                    stub: stub,
+                    store: store,
+                    windowID: windowID
                 )
                 // Recreate the pane (fresh editor + history controller) per prompt.
-                .id(entry.promptID)
+                .id(stub.uuid)
+            } else if let error = store.lastError, store.hasLoaded {
+                ContentUnavailableView(
+                    "Session Unavailable",
+                    systemImage: "bolt.slash",
+                    description: Text(error)
+                )
             } else {
                 ContentUnavailableView(
                     "No Prompt Selected",
@@ -115,51 +100,43 @@ struct SessionPromptEditorView: View {
         .navigationTitle(windowID.sessionName)
         .frame(minWidth: 760, minHeight: 480)
         .sheet(isPresented: $showCreatePrompt) {
-            if let session {
-                CreatePromptView(
-                    sessionDirURL: sessionDirURL,
-                    sessionRelPath: session.paths.relativePath,
-                    sessionDataURL: sessionDataURL,
-                    promptsDirURL: promptsDirURL,
-                    nextID: (prompts.map(\.promptID).max() ?? 0) + 1,
-                    preselectedKbites: session.kbite,
-                    sessionBackstory: session.backstory
-                )
-            } else {
-                Color.clear.onAppear { showCreatePrompt = false }
-            }
+            CreatePromptView(
+                store: store,
+                sessionStub: catalog.sessionsByUuid[store.sessionUuid],
+                sessionBackstory: store.session?.backstory ?? ""
+            )
         }
         .onChange(of: prompts) { _, new in
             // Default to newest once data arrives; recover if the selection vanishes.
-            if let id = selectedID, !new.contains(where: { $0.promptID == id }) {
-                selectedID = new.first?.promptID
-            } else if !didDefaultSelect, selectedID == nil, let first = new.first {
-                selectedID = first.promptID
+            if let uuid = selectedUuid, !new.contains(where: { $0.uuid == uuid }) {
+                selectedUuid = new.first?.uuid
+            } else if !didDefaultSelect, selectedUuid == nil, let first = new.first {
+                selectedUuid = first.uuid
                 didDefaultSelect = true
             }
         }
-        .task(id: windowID.sessionUUID) {
-            while !Task.isCancelled {
-                await fs.refreshSessionData(at: sessionDataURL)
-                await fs.refreshInstanceData(uuid: windowID.instanceUUID, at: instanceDataURL)
-                // Warm the parent project_data so RepName resolves in the header.
-                if let pid = fs.instanceData[windowID.instanceUUID]?.projectUUID {
-                    await fs.refreshProjectData(uuid: pid, at: projectDataURL)
-                }
-                if !didDefaultSelect, selectedID == nil, let first = prompts.first {
-                    selectedID = first.promptID
-                    didDefaultSelect = true
-                }
-                try? await Task.sleep(for: .seconds(1))
+        // Event-driven refresh: SESSION_GET on session invalidations. The
+        // stream is hoisted BEFORE the first refresh so an invalidation that
+        // fires during the initial (prefetch-heavy) load isn't lost.
+        .task(id: daemon.generation) {
+            let stream = daemon.hub.stream(for: .session(store.sessionUuid))
+            if !catalog.hasLoaded { await catalog.refresh() }
+            await store.refresh()
+            daemon.registerSession(store.sessionUuid, promptUuids: Set(store.prompts.map(\.uuid)))
+            for await _ in stream {
+                await store.refresh()
+                daemon.registerSession(store.sessionUuid, promptUuids: Set(store.prompts.map(\.uuid)))
             }
         }
-        // Warm each prompt's initial.yaml so the list filter can match on content.
-        // Only runs while the search box is non-empty (mirrors ProjectsView prefetch).
-        .task(id: promptQuery) {
-            guard SearchQuery(promptQuery).isActive else { return }
-            for entry in prompts where fs.promptInitials[dataURL(for: entry)] == nil {
-                await fs.refreshPromptInitial(dataURL: dataURL(for: entry))
+        // Keep instance/project identity + path derivations live on renames.
+        .task(id: daemon.generation) {
+            let stream = daemon.hub.stream(for: .topology)
+            for await _ in stream {
+                await catalog.refresh()
             }
+        }
+        .onDisappear {
+            daemon.unregisterSession(store.sessionUuid)
         }
     }
 }
@@ -172,20 +149,21 @@ private struct PromptNavigator: View {
     let instanceUUID: UUID
     let repositoryName: String?
     let systemPath: String?
-    let prompts: [GMCCPromptFilesEntry]
+    let changeSummary: ChangeSummary?
+    let prompts: [PromptStub]
     @Binding var query: String
-    @Binding var selectedID: Int?
+    @Binding var selectedUuid: String?
 
     var body: some View {
-        List(selection: $selectedID) {
+        List(selection: $selectedUuid) {
             Section {
                 if prompts.isEmpty {
                     Text(query.isEmpty ? "No prompts yet. Create one with +." : "No matching prompts.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(prompts) { entry in
-                        PromptNavRow(entry: entry).tag(entry.promptID)
+                    ForEach(prompts, id: \.uuid) { stub in
+                        PromptNavRow(stub: stub).tag(stub.uuid)
                     }
                 }
             } header: {
@@ -204,6 +182,15 @@ private struct PromptNavigator: View {
                     }
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    // Session-level change summary (FILE_CHANGE events land here).
+                    if let summary = changeSummary, summary.changeCount > 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "plusminus").font(.caption2)
+                            Text("\(summary.changeCount) changes · \(summary.distinctFiles) files · \(summary.totalLineSpan) lines")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    }
                 }
                 .textCase(nil)
                 .padding(.bottom, 4)
@@ -232,23 +219,23 @@ private struct PromptNavigator: View {
 }
 
 private struct PromptNavRow: View {
-    let entry: GMCCPromptFilesEntry
+    let stub: PromptStub
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "doc.text").foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.name).font(.body).lineLimit(1)
-                Text("id \(entry.promptID)").font(.caption2).foregroundStyle(.tertiary)
+                Text(stub.name).font(.body).lineLimit(1)
+                Text("id \(stub.seq)").font(.caption2).foregroundStyle(.tertiary)
             }
             Spacer()
-            PromptStatusBadge(status: entry.status)
+            PromptStatusBadge(status: PromptStatus(rawValue: stub.status))
         }
         .padding(.vertical, 2)
     }
 }
 
 private struct PromptStatusBadge: View {
-    let status: GMCCPromptStatus?
+    let status: PromptStatus?
     var body: some View {
         Text(label)
             .font(.caption2.weight(.medium))
@@ -256,7 +243,7 @@ private struct PromptStatusBadge: View {
             .background(color.opacity(0.18), in: .capsule)
             .foregroundStyle(color)
     }
-    private var label: String { status?.rawValue ?? "—" }
+    private var label: String { status?.rawValue.capitalized ?? "—" }
     private var color: Color {
         switch status {
         case .draft:      return .orange
@@ -270,109 +257,86 @@ private struct PromptStatusBadge: View {
 // MARK: - Editor pane
 
 private struct PromptEditorPane: View {
-    @Environment(GMCCFileSystemEmulation.self) private var fs
     @Environment(GMCCEnvironment.self) private var gmcc
-    let entry: GMCCPromptFilesEntry
-    let sessionDirURL: URL
-    let sessionUUID: UUID
-    let instanceUUID: UUID
+    @Environment(DaemonConnectionModel.self) private var daemon
+    @Environment(CatalogStore.self) private var catalog
+    let stub: PromptStub
+    let store: SessionStore
+    let windowID: SessionWindowID
 
     enum Field: Hashable { case backstory, goal, detail }
-    enum Tab: Hashable { case initial, clarified, memories }
+    enum Tab: Hashable { case initial, memories }
+
+    enum SaveIssue: Equatable {
+        case conflict
+        case locked
+        case failed(String)
+    }
+
+    /// Filesystem locations resolved OFF the main actor once per prompt/event
+    /// (never during body — the resolver does FileManager probes).
+    struct ResolvedPaths: Equatable, Sendable {
+        var sessionFolder: URL?
+        var instanceFolder: URL?
+        var projectFolder: URL?
+        var repoFolder: URL?
+        var promptFolder: URL?
+        var memoryRoot: URL?
+    }
 
     @State private var backstory = ""
     @State private var goal = ""
     @State private var detail = ""
     @State private var loaded = false
-    @State private var initialURL: URL?
-    @State private var promptFolderURL: URL?
-    @State private var kbitesLoaded: [String] = []
-    @State private var kbiteContextSummary: String?
-    // KBite registry pill box: the prompt's authoritative `kbite:` list (mirrored
-    // into kbitesLoaded), the installed-kbite options, and the data-file URL we
-    // rewrite on toggle.
+    @State private var loadFailed = false
+    @State private var saver: PromptSaveActor?
+    @State private var draftBox: PromptDraftBox
+    @State private var saveIssue: SaveIssue?
+    @State private var externalChange: PromptRow?
+    @State private var paths = ResolvedPaths()
+    // KBite registry pill box: the prompt's daemon-registered kbite codes plus
+    // installed-kbite options; toggles issue KBITE_ADD/REMOVE at prompt scope.
     @State private var selectedKbites: [String] = []
     @State private var availableKbites: [String] = []
-    @State private var promptDataURL: URL?
-    @State private var clarified: GMCCClarifiedPromptFile?
+    @State private var kbiteSuppress = false
     @State private var tab: Tab = .initial
     @State private var lastSaved = PromptEditHistory.EditState(backstory: "", goal: "", detail: "")
     @State private var history = PromptEditHistory()
     @State private var saveTask: Task<Void, Never>?
     @State private var selectedTier: BotTier?
     @State private var copiedField: Field?
-    @State private var copiedKey: String?
     @FocusState private var focus: Field?
-    // Find-in-page over read-only content; Memories tab state; editor find bridge.
+    // Find-in-page over content; Memories tab state.
     @State private var find = FindController()
     @State private var memoriesModel = MemoriesExplorerModel()
     @Environment(\.openWindow) private var openWindow
 
-    private var promptKey: String { "\(sessionUUID.uuidString)/\(entry.promptID)" }
-
-    // The prompt's memory/ folder, derived synchronously from entry.path (which points
-    // at {prompt}/{...}_data.gmcc.yaml) so the Memories tab has a root immediately,
-    // without waiting on the async load() that sets promptFolderURL.
-    private var memoryRootURL: URL {
-        sessionDirURL.appendingPathComponent(entry.path)
-            .deletingLastPathComponent()
-            .appendingPathComponent("memory", isDirectory: true)
+    init(stub: PromptStub, store: SessionStore, windowID: SessionWindowID) {
+        self.stub = stub
+        self.store = store
+        self.windowID = windowID
+        _draftBox = State(initialValue: PromptDraftBox(
+            promptKey: "\(windowID.sessionUUID.uuidString)/\(stub.seq)"))
     }
 
-    // ckfs folder hierarchy, derived from the session dir
-    // (.../projects/{P}/instances/{I}/sessions/{S}). The prompt folder is only
-    // known after load (it depends on the data file's initial_prompt_path).
-    private var sessionFolderURL: URL { sessionDirURL }
-    private var instanceFolderURL: URL {
-        sessionDirURL.deletingLastPathComponent().deletingLastPathComponent()   // drop {S}, drop "sessions"
-    }
-    private var projectFolderURL: URL {
-        instanceFolderURL.deletingLastPathComponent().deletingLastPathComponent()   // drop {I}, drop "instances"
-    }
-    // The instance's *target repo* on disk (instance_data.gmcc.yaml's system_path)
-    // — the actual implementation checkout, distinct from the ckfs instance folder.
-    private var repoFolderURL: URL? {
-        guard let p = fs.instanceData[instanceUUID]?.systemPath, !p.isEmpty else { return nil }
-        return URL(fileURLWithPath: p, isDirectory: true)
-    }
-    // Instance display name — used to name the per-instance iTerm Dynamic Profile.
-    private var instanceName: String {
-        fs.instanceData[instanceUUID]?.base.name ?? "—"
+    private var promptKey: String { draftBox.promptKey }
+
+    // The three fields are editable only while the prompt is a draft; a
+    // CONTENT_LOCKED save outcome freezes immediately (before the stub's
+    // status refresh lands).
+    private var editable: Bool {
+        PromptStatus(rawValue: stub.status) == .draft && saveIssue != .locked
     }
 
-    // The three initial fields are editable only while the prompt is a Draft;
-    // once it's Clarifying/Clarified the initial prompt is frozen.
-    private var editable: Bool { entry.status == .draft }
-    private var clarifiedAvailable: Bool { clarified != nil }
-
-    // Snapshot returned across the actor boundary by `load`.
-    private struct Loaded {
-        let folderURL: URL
-        let initialURL: URL
-        let initial: GMCCInitialPromptFile
-        let clarified: GMCCClarifiedPromptFile?
-        let kbite: [String]   // the data file's authoritative kbite registry
-    }
-
-    // MARK: Find-in-page (read-only content)
+    // MARK: Find-in-page
 
     private var findQuery: SearchQuery { find.searchQuery }
 
-    // Tabs expose ordered, find-able text segments. The Initial tab contributes its
-    // three fields whether editable or read-only (the editable editor uses the same
-    // inline find-in-page bar, scrolling to the matching field).
     private var findSegments: [(id: String, text: String)] {
         switch tab {
         case .initial:
             return [("backstory", backstory), ("goal", goal), ("detail", detail)]
-        case .clarified:
-            guard let c = clarified else { return [] }
-            var segs: [(id: String, text: String)] = []
-            if !c.backstory.isEmpty { segs.append((id: "c-backstory", text: c.backstory)) }
-            segs.append((id: "c-goal", text: c.refinedGoal))
-            segs.append((id: "c-detail", text: c.refinedDetail))
-            return segs
-        default:
+        case .memories:
             return []
         }
     }
@@ -393,9 +357,7 @@ private struct PromptEditorPane: View {
         }
     }
 
-    private var supportsFind: Bool {
-        tab == .initial || tab == .clarified
-    }
+    private var supportsFind: Bool { tab == .initial }
 
     private func segmentID(_ field: Field) -> String {
         switch field {
@@ -407,14 +369,22 @@ private struct PromptEditorPane: View {
 
     var body: some View {
         Group {
-            if loaded {
+            if loadFailed {
+                ContentUnavailableView {
+                    Label("Prompt Unavailable", systemImage: "bolt.slash")
+                } description: {
+                    Text("The prompt couldn't be loaded from the daemon.")
+                } actions: {
+                    Button("Retry") { Task { await load() } }
+                        .buttonStyle(.bordered)
+                }
+            } else if loaded {
                 VStack(spacing: 0) {
                     tabBar
                     Divider()
                     switch tab {
-                    case .initial:   initialTab
-                    case .clarified: clarifiedTab
-                    case .memories:  memoriesTab
+                    case .initial:  initialTab
+                    case .memories: memoriesTab
                     }
                 }
             } else {
@@ -422,8 +392,8 @@ private struct PromptEditorPane: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(entry.name)
-        .navigationSubtitle(entry.status?.rawValue ?? "")
+        .navigationTitle(stub.name)
+        .navigationSubtitle(PromptStatus(rawValue: stub.status)?.rawValue.capitalized ?? "")
         .toolbar {
             if tab == .initial && editable {
                 ToolbarItemGroup {
@@ -433,52 +403,78 @@ private struct PromptEditorPane: View {
                         .disabled(!history.canRedo)
                 }
             }
+            ToolbarItem {
+                DaemonStatusIndicator()
+            }
             // iTerm: open a terminal rooted at the instance's target repo. Uses a
             // per-instance Dynamic Profile so spawned windows/tabs inherit the repo dir.
             ToolbarItemGroup {
-                Button { openInITerm(repoFolderURL) } label: {
+                Button { openInITerm(paths.repoFolder) } label: {
                     Label("Open in iTerm", systemImage: "terminal")
                 }
-                .disabled(repoFolderURL == nil)
+                .disabled(paths.repoFolder == nil)
                 .help("Open an iTerm2 window in the instance's target repo (window cwd = repo, via a per-instance dynamic profile)")
             }
             ToolbarItemGroup {
-                Button { openInVSCode(repoFolderURL) } label: {
+                Button { openInVSCode(paths.repoFolder) } label: {
                     Label("Open Repo", systemImage: "hammer")
                 }
-                .disabled(repoFolderURL == nil)
+                .disabled(paths.repoFolder == nil)
                 .help("Open the instance's target repo (implementation checkout) in VS Code")
-                Button { openInVSCode(projectFolderURL) } label: {
+                Button { openInVSCode(paths.projectFolder) } label: {
                     Label("Open Project", systemImage: "folder")
                 }
+                .disabled(paths.projectFolder == nil)
                 .help("Open the project folder in VS Code")
-                Button { openInVSCode(instanceFolderURL) } label: {
+                Button { openInVSCode(paths.instanceFolder) } label: {
                     Label("Open Instance", systemImage: "internaldrive")
                 }
+                .disabled(paths.instanceFolder == nil)
                 .help("Open the instance folder in VS Code")
-                Button { openInVSCode(sessionFolderURL) } label: {
+                Button { openInVSCode(paths.sessionFolder) } label: {
                     Label("Open Session", systemImage: "arrow.triangle.branch")
                 }
+                .disabled(paths.sessionFolder == nil)
                 .help("Open the session folder in VS Code")
-                Button { openInVSCode(promptFolderURL) } label: {
+                Button { openInVSCode(paths.promptFolder) } label: {
                     Label("Open Prompt", systemImage: "chevron.left.forwardslash.chevron.right")
                 }
-                .disabled(promptFolderURL == nil)
+                .disabled(paths.promptFolder == nil)
                 .help("Open the prompt folder in VS Code")
             }
             // A connected cluster of the bot fidelity tiers. Each button copies
-            // that tier's resume command to the clipboard and stays highlighted
-            // as the last-clicked tier.
+            // that tier's resume command and stays highlighted as last-clicked.
             ToolbarItem(placement: .primaryAction) {
                 tierCluster
             }
         }
-        // Key on the whole entry so a live status change (Draft→Clarifying→Clarified)
-        // reloads (refetches the clarified file, re-freezes the initial fields).
-        .task(id: entry) { await load() }
-        // cmd+F: Initial (editable or read-only) and Clarified open the inline
-        // find-in-page bar. On the Memories tab, publish nil so the reader's own find
-        // handler owns cmd+F (avoids two publishers of \.yeetFind colliding).
+        // Seed once per prompt identity (the pane is recreated per uuid via
+        // .id(stub.uuid)); version changes flow through reconcileExternal(),
+        // which has the dirty-buffer guard — NEVER through a re-seed. (Keying
+        // on the whole stub re-ran load() on every autosave: stub carries
+        // `version`.)
+        .task(id: stub.uuid) { await load() }
+        // Targeted refresh + echo/kbite/path reconciliation on this prompt's
+        // events. Stream hoisted before any await so no invalidation is lost.
+        .task(id: stub.uuid) {
+            let stream = daemon.hub.stream(for: .prompt(stub.uuid))
+            for await _ in stream {
+                await store.refreshPrompt(uuid: stub.uuid)
+                await reconcileExternal()
+                reconcileKbites()
+                await resolvePaths()
+            }
+        }
+        // Status transitions (draft→clarifying→clarified) flip `editable` via
+        // the stub; adopt the frozen server content only when the buffer is clean.
+        .onChange(of: stub.status) { _, _ in
+            Task {
+                await store.refreshPrompt(uuid: stub.uuid)
+                await reconcileExternal()
+            }
+        }
+        // cmd+F: the Initial tab opens the inline find bar. On the Memories tab,
+        // publish nil so the reader's own find handler owns cmd+F.
         .focusedSceneValue(\.yeetFind, tab == .memories ? nil : {
             if supportsFind {
                 find.reset()
@@ -491,47 +487,45 @@ private struct PromptEditorPane: View {
             find.reset()
         }
         .onChange(of: focus) { old, new in
-            // Flush + record when leaving a field (only meaningful while editable).
-            if editable, old != nil, old != new { flush(record: true) }
+            // Flush when leaving a field (only meaningful while editable).
+            if editable, old != nil, old != new { flushSoon() }
         }
         // KBite registry edits persist immediately, in any prompt status. The
-        // `loaded` guard in saveKbites() ignores the seed assignment in load().
-        .onChange(of: selectedKbites) { _, _ in saveKbites() }
+        // `loaded` guard ignores the seed assignment in load(); the suppress
+        // flag ignores reconciliation assignments.
+        .onChange(of: selectedKbites) { old, new in
+            guard !kbiteSuppress else { return }
+            syncKbites(old: old, new: new)
+        }
         .onDisappear {
             saveTask?.cancel()
-            // Synchronous on the close/switch path: a detached write can be
-            // abandoned if the app terminates before it runs (e.g. Cmd+Q while
-            // focused). writeInitialPromptFile is nonisolated + fast.
-            flush(record: true, sync: true)
+            // Unregister FIRST (a hung flush must not strand a registry entry
+            // that later shadows a re-registered pane), then flush through the
+            // reference-backed box — no @State reads after teardown.
+            let box = draftBox
+            PromptFlushRegistry.shared.unregister(box.promptKey)
+            Task { await box.flush() }
         }
     }
 
     // MARK: Tabs
 
-    // Display binding for the Initial/Clarified segmented control. On the Memories
-    // tab there is no matching segment, so clamp the display to .initial (avoids the
-    // "Picker: selection invalid" warning + blank control); the Memories button shows
-    // the active tint instead.
-    private var segmentedTab: Binding<Tab> {
-        Binding(get: { tab == .memories ? .initial : tab }, set: { tab = $0 })
-    }
-
     private var tabBar: some View {
         HStack(spacing: 12) {
-            Picker("", selection: segmentedTab) {
-                Text("Initial").tag(Tab.initial)
-                if clarifiedAvailable { Text("Clarified").tag(Tab.clarified) }
-            }
-            .pickerStyle(.segmented)
-            .fixedSize()
-            .labelsHidden()
-            // Memories tab. Plain click switches inline; ⌘-click pops it out into its
-            // own window, handing off the current selection + expansion.
             Button {
-                if NSEvent.modifierFlags.contains(.command) {
+                tab = .initial
+            } label: {
+                Label("Initial", systemImage: "doc.text")
+            }
+            .buttonStyle(.bordered)
+            .tint(tab == .initial ? .accentColor : nil)
+            // Memories tab. Plain click switches inline; ⌘-click pops it out into
+            // its own window, handing off the current selection + expansion.
+            Button {
+                if NSEvent.modifierFlags.contains(.command), let root = paths.memoryRoot {
                     openWindow(value: PromptMemoriesWindowID(
-                        memoryRootURL: memoryRootURL,
-                        promptName: entry.name,
+                        memoryRootURL: root,
+                        promptName: stub.name,
                         selectedFile: memoriesModel.selectedFile,
                         expanded: Array(memoriesModel.expanded)
                     ))
@@ -544,14 +538,39 @@ private struct PromptEditorPane: View {
             .buttonStyle(.bordered)
             .tint(tab == .memories ? .accentColor : nil)
             .help("Memory file explorer — \u{2318}-click to open in a separate window")
+            statusAdvanceMenu
             if tab == .initial && !editable {
                 Label("Read-only", systemImage: "lock.fill")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
+            if let summary = store.promptDetails[stub.uuid]?.changeSummary, summary.changeCount > 0 {
+                Text("\(summary.changeCount) changes · \(summary.distinctFiles) files · \(summary.totalLineSpan) lines")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .help("File changes attributed to this prompt")
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
+    }
+
+    // Forward-only, adjacent-only status advance (PROMPT_SET_STATUS).
+    @ViewBuilder
+    private var statusAdvanceMenu: some View {
+        if let status = PromptStatus(rawValue: stub.status), let next = status.successor {
+            Menu {
+                Button("Advance to \(next.rawValue.capitalized)") {
+                    advanceStatus(to: next)
+                }
+            } label: {
+                Label(status.rawValue.capitalized, systemImage: "arrow.forward.circle")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Advance the prompt status (forward-only)")
+        }
     }
 
     private var initialTab: some View {
@@ -563,6 +582,7 @@ private struct PromptEditorPane: View {
                 }
                 ScrollView {
                     VStack(spacing: 16) {
+                        saveIssueBanner
                         KBitePillBox(available: availableKbites, selected: $selectedKbites)
                         sectionEditor("Backstory", field: .backstory, text: $backstory,
                                       minHeight: 90, hint: "Narrative context (inherited from the session).")
@@ -581,48 +601,62 @@ private struct PromptEditorPane: View {
         }
     }
 
-    // cmd+G / cmd+shift+G for the read-only find bar — nil (menu greyed) unless the
-    // bar is open with at least one match.
+    // Typed save-state surface: conflict / locked / transport failures render as
+    // a banner, never silent loss and never message-text matching.
+    @ViewBuilder
+    private var saveIssueBanner: some View {
+        if externalChange != nil || saveIssue == .conflict {
+            banner(color: .orange, icon: "exclamationmark.triangle.fill",
+                   text: "This prompt changed elsewhere.") {
+                Button("Reload") { acceptExternal() }
+                    .buttonStyle(.bordered).controlSize(.small)
+            }
+        } else if saveIssue == .locked {
+            banner(color: .blue, icon: "lock.fill",
+                   text: "This prompt left Draft — content is now read-only. Your unsaved edits were kept in undo history.") {
+                EmptyView()
+            }
+        } else if case .failed(let message) = saveIssue {
+            banner(color: .red, icon: "xmark.octagon.fill",
+                   text: "Save failed: \(message)") {
+                Button("Retry") {
+                    saveIssue = nil
+                    flushSoon()
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+            }
+        }
+    }
+
+    private func banner(color: Color, icon: String, text: String,
+                        @ViewBuilder action: () -> some View) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).foregroundStyle(color)
+            Text(text).font(.callout)
+            Spacer()
+            action()
+        }
+        .padding(12)
+        .background(color.opacity(0.12), in: .rect(cornerRadius: 10))
+    }
+
+    // cmd+G / cmd+shift+G for the find bar — nil (menu greyed) unless the bar
+    // is open with at least one match.
     private func readOnlyStep(_ delta: Int, proxy: ScrollViewProxy) -> (() -> Void)? {
         guard find.isPresented, supportsFind, findMatches.total > 0 else { return nil }
         return { stepFind(delta, proxy: proxy) }
     }
 
-    private var memoriesTab: some View {
-        MemoriesExplorer(rootURL: memoryRootURL, model: memoriesModel)
-    }
-
     @ViewBuilder
-    private var clarifiedTab: some View {
-        if let c = clarified {
-            ScrollViewReader { proxy in
-                VStack(spacing: 0) {
-                    if find.isPresented && supportsFind {
-                        FindBar(find: find, total: findMatches.total,
-                                onStep: { stepFind($0, proxy: proxy) })
-                    }
-                    ScrollView {
-                        VStack(spacing: 16) {
-                            if !c.backstory.isEmpty {
-                                readOnlyCard("Backstory", c.backstory, segmentID: "c-backstory")
-                            }
-                            readOnlyCard("Refined Goal", c.refinedGoal, segmentID: "c-goal")
-                            readOnlyCard("Refined Detail", c.refinedDetail, segmentID: "c-detail")
-                            qaCard("Goal Clarifications", c.goalClarifications)
-                            qaCard("Detail Clarifications", c.detailClarifications)
-                            if !c.constraints.isEmpty { bulletsCard("Constraints", c.constraints) }
-                        }
-                        .padding(20)
-                        .frame(maxWidth: 900, alignment: .leading)
-                        .frame(maxWidth: .infinity)
-                    }
-                }
-                .focusedSceneValue(\.yeetFindNext, readOnlyStep(+1, proxy: proxy))
-                .focusedSceneValue(\.yeetFindPrev, readOnlyStep(-1, proxy: proxy))
-            }
+    private var memoriesTab: some View {
+        if let root = paths.memoryRoot {
+            MemoriesExplorer(rootURL: root, model: memoriesModel)
         } else {
-            ContentUnavailableView("No Clarified Prompt", systemImage: "questionmark.circle",
-                                   description: Text("This prompt has not been clarified yet."))
+            ContentUnavailableView(
+                "No Memory Folder",
+                systemImage: "folder",
+                description: Text("This prompt has no memory folder on disk yet (and no registered artifacts).")
+            )
         }
     }
 
@@ -650,16 +684,18 @@ private struct PromptEditorPane: View {
                     .font(.caption2.monospaced()).foregroundStyle(.tertiary)
             }
             if editable {
-                // SwiftUI-native editor with live markdown header highlighting + a
-                // line-number gutter. cmd+F routes to the inline find-in-page bar, which
-                // selects the active match inside the editor.
+                // AppKit-backed editor with live markdown header highlighting + a
+                // line-number gutter. cmd+F routes to the inline find-in-page bar.
                 MarkdownSourceEditor(text: text, minHeight: minHeight,
                                      query: findQuery,
                                      activeOccurrence: activeLocal(segmentID(field)))
                     .background(.black.opacity(0.04), in: .rect(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
                     .id(segmentID(field))
-                    .onChange(of: text.wrappedValue) { _, _ in scheduleSave() }
+                    .onChange(of: text.wrappedValue) { _, _ in
+                        draftBox.markDirty(currentState())
+                        scheduleSave()
+                    }
             } else {
                 HighlightedText(source: text.wrappedValue.isEmpty ? "—" : text.wrappedValue,
                                 query: findQuery,
@@ -677,138 +713,80 @@ private struct PromptEditorPane: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
     }
 
-    // MARK: Read-only cards (clarified)
-
-    private func readOnlyCard(_ title: String, _ body: String, segmentID: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            copyHeader(title, copyText: body)
-            Group {
-                if let segmentID {
-                    HighlightedText(source: body.isEmpty ? "—" : body,
-                                    query: findQuery,
-                                    activeLocalOccurrence: activeLocal(segmentID))
-                        .id(segmentID)
-                } else {
-                    Text(body.isEmpty ? "—" : body)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 14))
-    }
-
-    private func copyHeader(_ title: String, copyText: String) -> some View {
-        HStack {
-            Button { copy(key: title, text: copyText) } label: {
-                HStack(spacing: 5) {
-                    Text(title).font(.headline)
-                    Image(systemName: copiedKey == title ? "checkmark" : "doc.on.doc")
-                        .font(.caption)
-                        .foregroundStyle(copiedKey == title ? .green : .secondary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Copy \(title.lowercased())")
-            Spacer()
-        }
-    }
-
-    @ViewBuilder
-    private func qaCard(_ title: String, _ items: [GMCCPromptClarification]) -> some View {
-        if !items.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(title).font(.headline)
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            if let r = item.rating {
-                                Text("\(r)")
-                                    .font(.caption2.bold())
-                                    .padding(.horizontal, 6).padding(.vertical, 2)
-                                    .background(.blue.opacity(0.18), in: .capsule)
-                                    .foregroundStyle(.blue)
-                            }
-                            Text(item.q).font(.subheadline.weight(.semibold))
-                                .textSelection(.enabled)
-                        }
-                        Text(item.a).font(.callout).foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(.black.opacity(0.04), in: .rect(cornerRadius: 8))
-                }
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .glassEffect(.regular, in: .rect(cornerRadius: 14))
-        }
-    }
-
-    private func bulletsCard(_ title: String, _ items: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.headline)
-            ForEach(Array(items.enumerated()), id: \.offset) { _, s in
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("•").foregroundStyle(.secondary)
-                    Text(s).font(.callout).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 14))
-    }
-
     // MARK: Load / save
 
     private func load() async {
-        // Persist any pending edits before reloading from disk — handles a live
-        // status transition that swaps `entry` without recreating the pane.
-        flush(record: true, sync: true)
         loaded = false
-        let dataURL = sessionDirURL.appendingPathComponent(entry.path)
-        let result = await Task.detached(priority: .userInitiated) { () -> Loaded? in
-            guard let data = try? GMCCRuntimeDecoder.decodePromptData(at: dataURL) else { return nil }
-            let folder = dataURL.deletingLastPathComponent()
-            let iURL = folder.appendingPathComponent(data.initialPromptPath)
-            guard let initial = try? GMCCRuntimeDecoder.decodeInitialPrompt(at: iURL) else { return nil }
-            var clar: GMCCClarifiedPromptFile?
-            if !data.clarifiedPromptPath.isEmpty {
-                let cURL = folder.appendingPathComponent(data.clarifiedPromptPath)
-                clar = try? GMCCRuntimeDecoder.decodeClarifiedPrompt(at: cURL)
-            }
-            return Loaded(folderURL: folder, initialURL: iURL, initial: initial,
-                          clarified: clar, kbite: data.kbite)
-        }.value
-
-        guard let r = result else { return }
-        backstory = r.initial.backstory
-        goal = r.initial.goal
-        detail = r.initial.detail
-        // The data-file `kbite:` registry is authoritative; mirror it into the
-        // initial.yaml's kbites_loaded so the two stay in sync.
-        selectedKbites = r.kbite
-        kbitesLoaded = r.kbite
-        kbiteContextSummary = r.initial.kbiteContextSummary
-        initialURL = r.initialURL
-        promptDataURL = dataURL
-        promptFolderURL = r.folderURL
-        clarified = r.clarified
+        loadFailed = false
+        saveIssue = nil
+        externalChange = nil
+        if store.promptDetails[stub.uuid] == nil {
+            await store.refreshPrompt(uuid: stub.uuid)
+        }
+        guard let response = store.promptDetails[stub.uuid] else {
+            loadFailed = true
+            return
+        }
+        let prompt = response.prompt
+        backstory = prompt.backstory
+        goal = prompt.goal
+        detail = prompt.detail
+        kbiteSuppress = true
+        selectedKbites = response.kbiteCodes
+        kbiteSuppress = false
+        let newSaver = PromptSaveActor(promptUuid: prompt.uuid, version: prompt.version)
+        saver = newSaver
+        draftBox.saver = newSaver
         loadAvailableKbites()
         let s = currentState()
         lastSaved = s
         history.load(promptKey: promptKey, current: s)
-        // Default to the clarified tab once it exists; otherwise the initial tab.
-        tab = clarifiedAvailable ? .clarified : .initial
+        tab = .initial
+        // Register with the quit-flush registry (bounded drain on termination).
+        PromptFlushRegistry.shared.register(draftBox)
         loaded = true
+        await resolvePaths()
+    }
+
+    /// Resolve filesystem locations off-main (the resolver does FileManager
+    /// probes; body must never trigger them).
+    private func resolvePaths() async {
+        let root = gmcc[.ckfsRoot]
+        let sessionStub = catalog.sessionsByUuid[store.sessionUuid]
+        let instance = catalog.instance(uuid: windowID.instanceUUID.wireString)
+        let project = instance.flatMap { inst in catalog.projects.first { $0.uuid == inst.projectUuid } }
+        let artifacts = store.promptDetails[stub.uuid]?.artifacts ?? []
+        let seq = stub.seq
+        let code = stub.code
+        let name = stub.name
+        let resolved: ResolvedPaths = await Task.detached(priority: .userInitiated) {
+            var p = ResolvedPaths()
+            if let path = instance?.absoluteFileSystemPath, !path.isEmpty {
+                p.repoFolder = URL(fileURLWithPath: path, isDirectory: true)
+            }
+            // No $GMCC_CKFS_ROOT → every ckfs-derived location is nil (buttons
+            // disable; Memories explains) instead of resolving against cwd.
+            guard let root, !root.isEmpty else { return p }
+            if let sessionStub {
+                p.sessionFolder = CkfsPathResolver.resolve(
+                    relative: sessionStub.ckfsRelativeStoragePath, ckfsRoot: root)
+                p.promptFolder = CkfsPathResolver.promptFolder(
+                    ckfsRoot: root, session: sessionStub, seq: seq, code: code, name: name)
+                p.memoryRoot = CkfsPathResolver.memoryRoot(
+                    ckfsRoot: root, session: sessionStub, seq: seq, code: code, name: name,
+                    artifacts: artifacts)
+            }
+            if let instance {
+                p.instanceFolder = CkfsPathResolver.resolve(
+                    relative: instance.ckfsRelativeStoragePath, ckfsRoot: root)
+            }
+            if let project {
+                p.projectFolder = CkfsPathResolver.resolve(
+                    relative: project.ckfsRelativeStoragePath, ckfsRoot: root)
+            }
+            return p
+        }.value
+        if paths != resolved { paths = resolved }
     }
 
     private func openInVSCode(_ url: URL?) {
@@ -818,57 +796,130 @@ private struct PromptEditorPane: View {
 
     private func openInITerm(_ url: URL?) {
         guard let url else { return }
-        ITerm.open(dir: url, instanceUUID: instanceUUID, instanceName: instanceName)
+        ITerm.open(dir: url, instanceUUID: windowID.instanceUUID,
+                   instanceName: catalog.instance(uuid: windowID.instanceUUID.wireString)?.name ?? "—")
     }
 
     private func currentState() -> PromptEditHistory.EditState {
         .init(backstory: backstory, goal: goal, detail: detail)
     }
 
-    // Debounced autosave (~5s after typing stops).
+    // Debounced autosave (~2s after typing stops — daemon writes are cheap
+    // socket round trips, so a short window shrinks worst-case loss).
     private func scheduleSave() {
+        // Paused while a conflict awaits resolution or the prompt locked
+        // (repeat CONTENT_LOCKED failures are pointless).
+        guard saveIssue != .conflict, saveIssue != .locked else { return }
         saveTask?.cancel()
         saveTask = Task {
-            try? await Task.sleep(for: .seconds(5))
+            try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
-            flush(record: true)
+            await flush(record: true)
         }
     }
 
-    // Persist current fields to initial.yaml (if changed) and record a history
-    // snapshot. `writeAtomicReplace` keeps the 1s read loop from seeing partial files.
-    private func flush(record: Bool, sync: Bool = false) {
-        guard loaded, let url = initialURL else { return }
+    private func flushSoon() {
+        saveTask?.cancel()
+        saveTask = Task { await flush(record: true) }
+    }
+
+    // Version-threaded save through the per-prompt actor. Typed outcomes drive
+    // the banner; a conflict pauses autosave until the user reloads.
+    private func flush(record: Bool) async {
+        guard loaded, let saver else { return }
         let s = currentState()
         if s == lastSaved {
             if record { history.record(s) }   // no-op if cursor already matches
             return
         }
-        lastSaved = s
-        if record { history.record(s) }
-        writeToDisk(s, url: url, sync: sync)
+        let outcome = await saver.save(backstory: s.backstory, goal: s.goal, detail: s.detail)
+        switch outcome {
+        case .saved:
+            lastSaved = s
+            draftBox.markSaved(s)
+            if record { history.record(s) }
+            if saveIssue != nil { saveIssue = nil }
+        case .conflict:
+            await store.refreshPrompt(uuid: stub.uuid)
+            externalChange = store.promptDetails[stub.uuid]?.prompt
+            saveIssue = .conflict
+            history.record(s)   // keep the local text reachable via undo
+        case .locked:
+            saveIssue = .locked
+            history.record(s)   // preserve unsaved edits as an orphaned draft
+            draftBox.markSaved(s)   // don't retry a locked draft at quit
+            await store.refreshPrompt(uuid: stub.uuid)
+        case .failed(let message):
+            saveIssue = .failed(message)
+        }
     }
 
-    private func writeToDisk(_ s: PromptEditHistory.EditState, url: URL, sync: Bool = false) {
-        let kb = kbitesLoaded, summary = kbiteContextSummary
-        let write = {
-            try? GMCCRuntimeEncoder.writeInitialPromptFile(
-                at: url, backstory: s.backstory, goal: s.goal, detail: s.detail,
-                kbitesLoaded: kb, kbiteContextSummary: summary
-            )
-        }
-        if sync {
-            write()   // inline on the calling (main) thread — survives app termination
+    // An UPDATE_PROMPT event arrived for this prompt: the refetched row's
+    // version against the save actor's watermark separates our own echo from a
+    // genuine external edit. Adopt silently only when the buffer is clean.
+    private func reconcileExternal() async {
+        guard loaded, let saver,
+              let fresh = store.promptDetails[stub.uuid]?.prompt else { return }
+        let watermark = await saver.lastWrittenVersion
+        guard fresh.version > watermark else { return }   // own echo — drop
+        if currentState() == lastSaved {
+            backstory = fresh.backstory
+            goal = fresh.goal
+            detail = fresh.detail
+            lastSaved = currentState()
+            await saver.adoptVersion(fresh.version)
         } else {
-            Task.detached(priority: .userInitiated) { write() }
+            externalChange = fresh   // never clobber in-flight typing
+        }
+    }
+
+    private func acceptExternal() {
+        guard let fresh = externalChange ?? store.promptDetails[stub.uuid]?.prompt else { return }
+        backstory = fresh.backstory
+        goal = fresh.goal
+        detail = fresh.detail
+        lastSaved = currentState()
+        draftBox.markSaved(lastSaved)
+        externalChange = nil
+        if saveIssue == .conflict { saveIssue = nil }
+        history.record(lastSaved)
+        Task { await saver?.adoptVersion(fresh.version) }
+    }
+
+    // MARK: Status transitions
+
+    private func advanceStatus(to next: PromptStatus) {
+        let expected = store.promptDetails[stub.uuid]?.prompt.version ?? stub.version
+        Task {
+            do {
+                _ = try await GMCCDaemonService.shared.setPromptStatus(PromptSetStatusRequest(
+                    promptUuid: stub.uuid,
+                    expectedVersion: expected,
+                    status: next
+                ))
+                await store.refresh()
+            } catch let error as DaemonError {
+                switch error {
+                case .invalidTransition:
+                    saveIssue = .failed("Status transitions are forward-only and adjacent-only.")
+                case .versionConflict:
+                    await store.refreshPrompt(uuid: stub.uuid)
+                    externalChange = store.promptDetails[stub.uuid]?.prompt
+                    saveIssue = .conflict
+                default:
+                    saveIssue = .failed(String(describing: error))
+                }
+            } catch {
+                saveIssue = .failed(String(describing: error))
+            }
         }
     }
 
     // MARK: KBites
 
     // Installed kbites under $GMCC_KBITE_DIGESTED, unioned with the current
-    // selection so an already-active kbite missing from disk still renders (and
-    // can be deselected). Same scan as CreatePromptView.loadKbites().
+    // selection so an already-registered kbite missing from disk still renders
+    // (and can be deselected).
     private func loadAvailableKbites() {
         var names: [String] = []
         if let digested = gmcc[.kbiteDigested] {
@@ -884,42 +935,69 @@ private struct PromptEditorPane: View {
         availableKbites = Set(names).union(selectedKbites).sorted()
     }
 
-    // Persist a pill toggle: write the registry to the data file AND mirror it into
-    // initial.yaml's kbites_loaded. Synchronous on the main thread (the writes are
-    // nonisolated + fast, and a toggle is a discrete action) so the change can't be
-    // abandoned if the app terminates. Guarded on `loaded` so seeding selection in
-    // load() doesn't trigger a spurious write.
-    private func saveKbites() {
-        guard loaded, let iURL = initialURL, let dURL = promptDataURL else { return }
-        kbitesLoaded = selectedKbites
-        try? GMCCRuntimeEncoder.writeInitialPromptFile(
-            at: iURL, backstory: backstory, goal: goal, detail: detail,
-            kbitesLoaded: selectedKbites, kbiteContextSummary: kbiteContextSummary
-        )
-        try? GMCCRuntimeEncoder.updatePromptDataKbite(at: dURL, kbite: selectedKbites)
+    // Persist a pill toggle as registry deltas at prompt scope. KBITE_ADD
+    // upserts the kbite row, so this works against an empty kbite table. On
+    // failure the pills reconcile back to the db state and a banner shows.
+    private func syncKbites(old: [String], new: [String]) {
+        guard loaded else { return }
+        let added = Set(new).subtracting(old)
+        let removed = Set(old).subtracting(new)
+        guard !added.isEmpty || !removed.isEmpty else { return }
+        let uuid = stub.uuid
+        Task {
+            let service = GMCCDaemonService.shared
+            var failed = false
+            for code in added.sorted() {
+                if (try? await service.addKbite(scope: .prompt, ownerUuid: uuid, code: code)) == nil {
+                    failed = true
+                }
+            }
+            for code in removed.sorted() {
+                if (try? await service.removeKbite(scope: .prompt, ownerUuid: uuid, code: code)) == nil {
+                    failed = true
+                }
+            }
+            await store.refreshPrompt(uuid: uuid)
+            if failed {
+                reconcileKbites()
+                saveIssue = .failed("KBite registry update failed — pills reset to the daemon's state.")
+            }
+        }
+    }
+
+    // Converge the pill box back to the db registry (terminal-side edits,
+    // failed toggles). Suppressed from re-triggering syncKbites.
+    private func reconcileKbites() {
+        guard loaded, let codes = store.promptDetails[stub.uuid]?.kbiteCodes else { return }
+        if Set(codes) != Set(selectedKbites) {
+            kbiteSuppress = true
+            selectedKbites = codes
+            availableKbites = Set(availableKbites).union(codes).sorted()
+            kbiteSuppress = false
+        }
     }
 
     // MARK: Undo / redo
 
     private func applyUndo() {
-        saveTask?.cancel()
         guard let s = history.undo() else { return }
         apply(s)
     }
 
     private func applyRedo() {
-        saveTask?.cancel()
         guard let s = history.redo() else { return }
         apply(s)
     }
 
-    // Apply a history state to the fields + disk WITHOUT recording a new snapshot.
+    // Apply a history state to the fields WITHOUT recording a new snapshot, then
+    // persist through the version-threaded save path (never a blind write).
     private func apply(_ s: PromptEditHistory.EditState) {
         backstory = s.backstory
         goal = s.goal
         detail = s.detail
-        lastSaved = s
-        if let url = initialURL { writeToDisk(s, url: url) }
+        draftBox.markDirty(s)
+        saveTask?.cancel()
+        saveTask = Task { await flush(record: false) }
     }
 
     // MARK: Clipboard
@@ -933,21 +1011,9 @@ private struct PromptEditorPane: View {
         }
     }
 
-    private func copy(key: String, text: String) {
-        Clipboard.copy(text)
-        copiedKey = key
-        Task {
-            try? await Task.sleep(for: .seconds(1.2))
-            if copiedKey == key { copiedKey = nil }
-        }
-    }
-
     // A connected cluster of bot-fidelity tier buttons (1/2/3-person icons).
-    // Each button copies that tier's resume command (`/{command} {id}`) to the
-    // clipboard and becomes the highlighted "last-clicked" tier. Rendered as a
-    // ControlGroup so the toolbar draws it as one cohesive, borderless cluster
-    // flush with the surrounding toolbar icons. Re-clicking the same tier
-    // re-fires the copy (unlike a segmented Picker bound to a selection).
+    // Each button copies that tier's resume command (`/{command} {seq}`) to the
+    // clipboard and becomes the highlighted "last-clicked" tier.
     private var tierCluster: some View {
         ControlGroup {
             ForEach(BotTier.allCases) { tier in
@@ -956,22 +1022,20 @@ private struct PromptEditorPane: View {
                     Label(tier.command, systemImage: tierSymbol(tier, selected: isSelected))
                 }
                 .tint(isSelected ? .accentColor : nil)
-                .help("Copy \(tier.command(for: entry.promptID)) to the clipboard")
+                .help("Copy \(tier.command(for: Int(stub.seq))) to the clipboard")
             }
         } label: {
             Label("Resume Command", systemImage: "person.fill")
         }
     }
 
-    // Filled symbol for the last-clicked tier so its highlight is unambiguous
-    // even where the accent tint is subtle; unselected tiers use the outline
-    // variant. (person / person.2 / person.3 + their .fill counterparts.)
     private func tierSymbol(_ tier: BotTier, selected: Bool) -> String {
         selected ? tier.symbol : tier.symbol.replacingOccurrences(of: ".fill", with: "")
     }
 
     private func copyResume(_ tier: BotTier) {
-        Clipboard.copy(tier.command(for: entry.promptID))
+        // Bot commands resolve prompts by their daemon-allocated per-session seq.
+        Clipboard.copy(tier.command(for: Int(stub.seq)))
         selectedTier = tier
     }
 }

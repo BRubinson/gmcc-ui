@@ -2,8 +2,8 @@ import SwiftUI
 
 // Thin scene-root wrappers so each feature window owns its own view-local store —
 // avoids the App-level @State-shared-across-WindowGroup-instances trap. The shared
-// singletons (GMCCEnvironment, GMCCFileSystemEmulation) are injected by the App via
-// the .gmccEnv(_:_:) modifier.
+// singletons (GMCCEnvironment, FileTreeStore, DaemonConnectionModel, CatalogStore)
+// are injected by the App via the .gmccEnv(_:) modifier.
 
 /// Yeet Viewer window. YeetViewerView provides its own NavigationStack + toolbar.
 struct YeetViewerScene: View {

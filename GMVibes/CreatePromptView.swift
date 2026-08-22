@@ -1,20 +1,21 @@
 import SwiftUI
+import GMCCDaemonKit
 
-// Authoring sheet: create a new prompt folder inside an existing session.
-// Captures name + backstory/goal/detail + a kbite multi-select (pre-seeded from
-// the parent session's kbite list; options scanned from $GMCC_KBITE_DIGESTED).
+// Authoring sheet: create a new prompt in an existing session via PROMPT_CREATE
+// (the daemon allocates the per-session seq atomically — no client-side id
+// derivation). Captures name + backstory/goal/detail + a kbite multi-select
+// (pre-seeded from the session-scope registry; options scanned from
+// $GMCC_KBITE_DIGESTED); selected kbites are registered at prompt scope after
+// creation.
 struct CreatePromptView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(GMCCFileSystemEmulation.self) private var fs
     @Environment(GMCCEnvironment.self) private var gmcc
 
-    // Context supplied by SessionPromptsView.
-    let sessionDirURL: URL
-    let sessionRelPath: String
-    let sessionDataURL: URL
-    let promptsDirURL: URL
-    let nextID: Int
-    let preselectedKbites: [String]
+    let store: SessionStore
+    // The session's catalog stub — needed to create the prompt folder on disk
+    // and to store the ckfs path on the row. nil when the catalog hasn't
+    // resolved the session (folder creation is skipped, row still created).
+    let sessionStub: SessionStub?
     // Parent session's backstory, inherited into the new prompt at sheet-open
     // (pre-filled, editable — the prompt's backstory may then diverge).
     let sessionBackstory: String
@@ -29,7 +30,10 @@ struct CreatePromptView: View {
     @State private var isSaving = false
     @State private var errorText: String?
 
-    private var segment: String { Self.previewSegment(name) }
+    // Code derives from the TRIMMED name so code and stored name agree.
+    private var segment: String {
+        CkfsPathResolver.slug(name.trimmingCharacters(in: .whitespaces))
+    }
     private var canSave: Bool { !segment.isEmpty && !isSaving }
 
     var body: some View {
@@ -38,7 +42,7 @@ struct CreatePromptView: View {
                 Section("Prompt") {
                     TextField("Name", text: $name)
                     if !segment.isEmpty {
-                        LabeledContent("Folder", value: "prompts/\(nextID)_\(segment)")
+                        LabeledContent("Code", value: segment)
                     }
                 }
                 Section("Backstory") {
@@ -84,7 +88,7 @@ struct CreatePromptView: View {
         }
         .frame(minWidth: 520, minHeight: 560)
         .task {
-            loadKbites()
+            await loadKbites()
             // Inherit the session backstory once; never clobber user edits on re-entry.
             if !didSeedBackstory { backstory = sessionBackstory; didSeedBackstory = true }
         }
@@ -92,8 +96,10 @@ struct CreatePromptView: View {
 
     // MARK: - KBite options
 
-    private func loadKbites() {
-        let preselected = Set(preselectedKbites)
+    private func loadKbites() async {
+        // Session-scope registry seeds the preselection (kbite inheritance).
+        let sessionCodes = (try? await GMCCDaemonService.shared.listKbites(
+            scope: .session, ownerUuid: store.sessionUuid))?.map(\.code) ?? []
         var names: [String] = []
         if let digested = gmcc[.kbiteDigested] {
             let dir = URL(fileURLWithPath: digested, isDirectory: true)
@@ -106,24 +112,10 @@ struct CreatePromptView: View {
             }.sorted()
         }
         // Always surface inherited kbites even if the digested dir scan misses them.
+        let preselected = Set(sessionCodes)
         let merged = Set(names).union(preselected)
         availableKbites = merged.sorted()
-        selectedKbites = preselected.intersection(merged)
-    }
-
-    // Mirror of the encoder's segment rule, for the live folder preview.
-    private static func previewSegment(_ name: String) -> String {
-        let lower = name.lowercased()
-        var out = ""
-        var lastWasSep = false
-        for ch in lower {
-            if ch == "/" { out += "__"; lastWasSep = false }
-            else if ch.isLetter || ch.isNumber || ch == "-" { out.append(ch); lastWasSep = false }
-            else { if !lastWasSep && !out.isEmpty { out.append("_") }; lastWasSep = true }
-        }
-        while out.hasSuffix("_") { out.removeLast() }
-        while out.hasPrefix("_") { out.removeFirst() }
-        return out
+        selectedKbites = preselected
     }
 
     // MARK: - Save
@@ -131,40 +123,55 @@ struct CreatePromptView: View {
     private func save() async {
         isSaving = true
         errorText = nil
-        let dirURL = sessionDirURL
-        let relPath = sessionRelPath
-        let id = nextID
-        let nm = name.trimmingCharacters(in: .whitespaces)
-        let bs = backstory, gl = goal, dt = detail
+        let service = GMCCDaemonService.shared
         let kbites = availableKbites.filter { selectedKbites.contains($0) }   // stable order
-
-        let result: Result<URL, Error> = await Task.detached(priority: .userInitiated) {
-            do {
-                let url = try GMCCRuntimeEncoder.writePromptFolder(
-                    sessionDirURL: dirURL,
-                    sessionRelPath: relPath,
-                    nextID: id,
-                    name: nm,
-                    backstory: bs,
-                    goal: gl,
-                    detail: dt,
-                    kbites: kbites
-                )
-                return .success(url)
-            } catch {
-                return .failure(error)
+        do {
+            // Code passed EXPLICITLY — a nil code defaults to "p{seq}", which
+            // would diverge from the prompts/<seq>_<code> folder convention.
+            // ckfsRelativeStoragePath stays nil: the daemon allocates seq
+            // atomically, so the final path is unknowable client-side pre-create
+            // (a half-path would be worse than none); the exact folder created
+            // below is what promptFolder()'s rule 1 matches.
+            let row = try await service.createPrompt(PromptCreateRequest(
+                sessionUuid: store.sessionUuid,
+                code: segment,
+                name: name.trimmingCharacters(in: .whitespaces),
+                backstory: backstory,
+                goal: goal,
+                detail: detail
+            ))
+            for code in kbites {
+                _ = try? await service.addKbite(scope: .prompt, ownerUuid: row.uuid, code: code)
             }
-        }.value
-
-        switch result {
-        case .success:
-            await fs.refreshSessionData(at: sessionDataURL)
-            await fs.refreshSessionPrompts(at: promptsDirURL)
+            // Give the prompt its filesystem presence (memory/ for bot
+            // artifacts) — the daemon owns the row, the app owns the folder.
+            if let sessionStub, let root = gmcc[.ckfsRoot], !root.isEmpty {
+                let folder = CkfsPathResolver.conventionalPromptFolder(
+                    ckfsRoot: root, session: sessionStub, seq: row.seq, code: row.code)
+                let memory = folder.appendingPathComponent("memory", isDirectory: true)
+                try? FileManager.default.createDirectory(
+                    at: memory, withIntermediateDirectories: true)
+            }
+            await store.refresh()
             isSaving = false
             dismiss()
-        case .failure(let err):
-            errorText = err.localizedDescription
+        } catch let error as DaemonError {
+            errorText = Self.describe(error)
             isSaving = false
+        } catch {
+            errorText = String(describing: error)
+            isSaving = false
+        }
+    }
+
+    private static func describe(_ error: DaemonError) -> String {
+        switch error {
+        case .notFound: return "Session not in the GMCC database — run /import_legacy_yaml_gmcc first."
+        case .notInstalled: return "Daemon not installed (run build_daemon.sh)."
+        case .unreachable(let m): return m
+        case .server(let code, let message): return "\(code): \(message)"
+        case .transport(let m): return m
+        default: return String(describing: error)
         }
     }
 }

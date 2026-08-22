@@ -3,7 +3,7 @@ import Foundation
 // A value-typed, polled snapshot of a directory subtree. Unlike KBiteFileNode
 // (eager, synchronous, main-actor, never invalidated), this is walked off the main
 // actor and re-walked on the app's existing 1s poll cadence via
-// GMCCFileSystemEmulation.refreshFileTree — so files an architect agent writes into
+// FileTreeStore.refreshFileTree — so files an architect agent writes into
 // a prompt's memory/ folder appear live without a manual reload. Equality includes
 // per-node modifiedAt so a rewrite (not just add/remove) re-publishes.
 struct FileTreeNode: Identifiable, Hashable {
