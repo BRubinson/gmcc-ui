@@ -243,22 +243,21 @@ private struct SessionLevel: View {
 // MARK: - Session leaf (level 2)
 
 private struct SessionLeafRow: View {
-    @Environment(\.openWindow) private var openWindow
+    @Environment(WindowNav.self) private var nav
     let session: SessionStub
     let instance: InstanceRow
 
     var body: some View {
         Button {
-            // Opening a session spawns/focuses its own window (one per session
-            // UUID). A malformed uuid disables the row rather than fabricating
-            // an identity that would open a dead window.
+            // Navigate this window to the session. A malformed uuid disables
+            // the row rather than fabricating an identity for a dead screen.
             guard let sessionUUID = UUID(uuidString: session.uuid),
                   let instanceUUID = UUID(uuidString: instance.uuid) else { return }
-            openWindow(value: SessionWindowID(
+            nav.go(.session(SessionWindowID(
                 sessionUUID: sessionUUID,
                 instanceUUID: instanceUUID,
                 sessionName: session.name
-            ))
+            )))
         } label: {
             Label {
                 VStack(alignment: .leading, spacing: 2) {

@@ -34,9 +34,11 @@ final class DaemonConnectionModel {
 
     let hub = InvalidationHub()
 
-    /// Open session windows register their prompt uuids so prompt-subject
+    /// Live session scopes register their prompt uuids so prompt-subject
     /// events route to the owning session only; unknown subjects fan out.
-    private var sessionPrompts: [String: Set<String>] = [:]
+    /// Owner-token guarded: a retired scope's late unregister must not kill
+    /// routing for a successor scope on the same session.
+    private var sessionPrompts: [String: (owner: ObjectIdentifier, prompts: Set<String>)] = [:]
 
     private let service = GMCCDaemonService.shared
     private var runTask: Task<Void, Never>?
@@ -71,18 +73,21 @@ final class DaemonConnectionModel {
 
     // MARK: - Session routing registry
 
-    func registerSession(_ sessionUuid: String, promptUuids: Set<String>) {
-        if sessionPrompts[sessionUuid] != promptUuids {
-            sessionPrompts[sessionUuid] = promptUuids
+    func registerSession(_ sessionUuid: String, promptUuids: Set<String>, owner: ObjectIdentifier) {
+        let current = sessionPrompts[sessionUuid]
+        if current?.owner != owner || current?.prompts != promptUuids {
+            sessionPrompts[sessionUuid] = (owner, promptUuids)
         }
     }
 
-    func unregisterSession(_ sessionUuid: String) {
-        sessionPrompts[sessionUuid] = nil
+    func unregisterSession(_ sessionUuid: String, ifOwnedBy owner: ObjectIdentifier) {
+        if sessionPrompts[sessionUuid]?.owner == owner {
+            sessionPrompts[sessionUuid] = nil
+        }
     }
 
     private func owningSession(ofPrompt uuid: String) -> String? {
-        sessionPrompts.first { $0.value.contains(uuid) }?.key
+        sessionPrompts.first { $0.value.prompts.contains(uuid) }?.key
     }
 
     // MARK: - Supervising loop
@@ -154,7 +159,7 @@ final class DaemonConnectionModel {
                 setHealth(.incompatible(daemonVersion: daemonVersion))
             default:
                 setHealth(.down(
-                    reason: intentionalStop ? "Daemon stopped" : Self.describe(error),
+                    reason: intentionalStop ? "Daemon stopped" : error.userMessage,
                     intentional: intentionalStop))
             }
         } catch {
@@ -183,7 +188,7 @@ final class DaemonConnectionModel {
             case .clientTooOld(let daemonVersion):
                 setHealth(.incompatible(daemonVersion: daemonVersion))
             default:
-                setHealth(.down(reason: Self.describe(error), intentional: false))
+                setHealth(.down(reason: error.userMessage, intentional: false))
             }
         } catch {
             setHealth(.down(reason: String(describing: error), intentional: false))
@@ -203,7 +208,7 @@ final class DaemonConnectionModel {
         if let stored = (defaults.object(forKey: Self.cursorKey) as? NSNumber)?.int64Value, stored > 0 {
             lastPersistedCursor = max(lastPersistedCursor, stored)
             let stamp = defaults.object(forKey: Self.cursorStampKey) as? Date ?? .distantPast
-            let logHead = Int64(status?.tableCounts["daemon_event"] ?? 0)
+            let logHead = Int64(status?.tableCounts.first(where: { $0.name == "daemon_event" })?.count ?? 0)
             if Date().timeIntervalSince(stamp) < Self.cursorMaxAge, stored <= logHead {
                 sinceId = stored
             }
@@ -286,12 +291,22 @@ final class DaemonConnectionModel {
             hub.invalidate(.changes)
             hub.invalidateAllSessions()
         case .addKbite, .removeKbite:
-            hub.invalidate(.kbites)
             // At prompt scope the subject is the owner (prompt) uuid — refresh
             // the open editor's pills for terminal-side registry edits.
             if let uuid = event.subjectUuid { hub.invalidate(.prompt(uuid)) }
         case .kbiteDigest, .kbiteKeywordTag:
-            hub.invalidate(.kbites)
+            // No subscriber surface: the KBites browser reads the filesystem
+            // and its search hits the daemon on demand.
+            break
+        case .clarificationChange, .architectureChange, .promptMemoryChange:
+            // No subscriber surface yet: the subjects are clarification /
+            // architecture summary uuids and memory/ directories, none of
+            // which any open window renders from the daemon.
+            break
+        case .configSet:
+            // Config (ckfs roots) is read from the environment at boot, not
+            // live from the daemon.
+            break
         case .backup, .daemonStart:
             Task { await refreshStatus() }
         case .daemonStop:
@@ -315,13 +330,4 @@ final class DaemonConnectionModel {
         if health != new { health = new }
     }
 
-    private static func describe(_ error: DaemonError) -> String {
-        switch error {
-        case .unreachable(let m): return m
-        case .transport(let m): return m
-        case .server(let code, let message): return "\(code): \(message)"
-        case .daemonTooOld(_, let message): return message
-        default: return String(describing: error)
-        }
-    }
 }

@@ -23,10 +23,15 @@ extension Store {
             let (projectUuid, _) = try self.ensureProject(db, req.project)
             let (instanceUuid, _) = try self.ensureInstance(db, req.instance, projectUuid: projectUuid)
             let (sessionUuid, _) = try self.ensureSession(db, req.session, instanceUuid: instanceUuid)
+            // The comparison join key: normalized at the boundary so
+            // architecture change rows and file changes always meet on the
+            // same repo-relative string (absolute-outside-instance rejected).
+            let relativePath = try Store.normalizeRepoRelativePath(
+                req.relativePath, repoRoot: req.instance.absoluteFileSystemPath)
             let sessionFileUuid = try self.ensureSessionFile(
                 db,
                 sessionUuid: sessionUuid,
-                relativePath: req.relativePath,
+                relativePath: relativePath,
                 changeKind: req.changeKind
             )
 
@@ -48,16 +53,21 @@ extension Store {
                 rangeUuids.append(rangeUuid)
             }
 
+            // Item 4: session_uuid in the payload lets GMVibes route the
+            // event to one session instead of invalidating all of them.
             try self.appendEvent(
                 db,
                 kind: .fileChange,
                 subjectUuid: fileChangeUuid,
                 payload: Store.jsonPayload([
-                    "relative_path": req.relativePath,
+                    "relative_path": relativePath,
                     "change_kind": req.changeKind.rawValue,
                     "ranges": req.ranges.count,
+                    "session_uuid": sessionUuid,
                 ])
             )
+            // Item 3: file-change writes advance session recency.
+            try self.touchSession(db, uuid: sessionUuid)
 
             return FileChangeAddResponse(
                 sessionFileUuid: sessionFileUuid,
@@ -105,16 +115,27 @@ extension Store {
                     LIMIT \(limit)
                     """,
                 arguments: StatementArguments(arguments))
-            let changes = try rows.map { row -> FileChangeRow in
-                let uuid: String = row["uuid"]
-                let ranges = try Row.fetchAll(
+            // One IN(...) prefetch of all ranges grouped in memory — 2
+            // statements total, not one per returned row (251 at limit 250).
+            let uuids = rows.map { $0["uuid"] as String }
+            var rangesByChange: [String: [ChangeRangeRow]] = [:]
+            if !uuids.isEmpty {
+                let placeholders = Array(repeating: "?", count: uuids.count).joined(separator: ", ")
+                for row in try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT line_start, line_end FROM file_change_range
-                        WHERE file_change_uuid = ? ORDER BY id
+                        SELECT file_change_uuid, line_start, line_end FROM file_change_range
+                        WHERE file_change_uuid IN (\(placeholders)) ORDER BY id
                         """,
-                    arguments: [uuid]
-                ).map { ChangeRangeRow(lineStart: $0["line_start"], lineEnd: $0["line_end"]) }
+                    arguments: StatementArguments(uuids)
+                ) {
+                    let changeUuid: String = row["file_change_uuid"]
+                    rangesByChange[changeUuid, default: []].append(
+                        ChangeRangeRow(lineStart: row["line_start"], lineEnd: row["line_end"]))
+                }
+            }
+            let changes = rows.map { row -> FileChangeRow in
+                let uuid: String = row["uuid"]
                 return FileChangeRow(
                     uuid: uuid,
                     sessionUuid: row["session_uuid"],
@@ -122,7 +143,7 @@ extension Store {
                     relativePath: row["relative_path"],
                     changeKind: row["change_kind"],
                     createdAt: row["created_at"],
-                    ranges: ranges
+                    ranges: rangesByChange[uuid] ?? []
                 )
             }
             return FileChangeListResponse(changes: changes)

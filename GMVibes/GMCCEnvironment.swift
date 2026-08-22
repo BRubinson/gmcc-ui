@@ -3,32 +3,23 @@ import Observation
 
 enum GMCCEnvKey: String, CaseIterable, Hashable {
     case ckfsRoot       = "GMCC_CKFS_ROOT"
-    case kbite          = "GMCC_KBITE"
+    // The kbite roots survive only for the KBites browser's filesystem tabs;
+    // they die when the daemon serves kbite tree listings (written goal).
     case kbiteDigested  = "GMCC_KBITE_DIGESTED"
     case kbiteOpen      = "GMCC_KBITE_OPEN"
-    case projects       = "GMCC_PROJECTS"
-    case projectsIndex  = "GMCC_PROJECTS_INDEX"
 }
 
-// Runtime vars exported by detect_repo.sh on SessionStart (via $CLAUDE_ENV_FILE).
-// These are not persisted to ~/.zshrc — they're per-session and only visible
-// when the app is launched from a process that has them set.
-enum GMCCRuntimeEnvKey: String, CaseIterable, Hashable {
-    case booted       = "GMCC_BOOTED"
-    case pluginRoot   = "GMCC_PLUGIN_ROOT"
-    case projectPath  = "GMCC_PROJECT_PATH"
-    case instancePath = "GMCC_INSTANCE_PATH"
-    case sessionPath  = "GMCC_SESSION_PATH"
-}
-
+/// Locator for the few filesystem roots the daemon can't answer yet (memory
+/// files, folder-open actions, KBites browse tabs). Resolution order per key:
+/// process environment → conventional-location probe → a single-key ~/.zshrc
+/// scan. The old 140-line multi-variable shell parser/expander is gone — a
+/// PATHS-style daemon message (written goal) retires this file entirely.
 @Observable
 @MainActor
 final class GMCCEnvironment {
     private(set) var values: [GMCCEnvKey: String] = [:]
-    private(set) var runtimeValues: [GMCCRuntimeEnvKey: String] = [:]
 
     subscript(key: GMCCEnvKey) -> String? { values[key] }
-    subscript(runtime key: GMCCRuntimeEnvKey) -> String? { runtimeValues[key] }
 
     var isLoaded: Bool { values[.ckfsRoot] != nil }
 
@@ -37,77 +28,80 @@ final class GMCCEnvironment {
     }
 
     func refresh() {
-        values = Self.scanZshrc()
-        runtimeValues = Self.scanProcessEnvironment()
-    }
-
-    private static func scanProcessEnvironment() -> [GMCCRuntimeEnvKey: String] {
-        let env = ProcessInfo.processInfo.environment
-        var out: [GMCCRuntimeEnvKey: String] = [:]
-        for key in GMCCRuntimeEnvKey.allCases {
-            if let value = env[key.rawValue], !value.isEmpty {
-                out[key] = value
-            }
-        }
-        return out
-    }
-
-    private static func scanZshrc() -> [GMCCEnvKey: String] {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let zshrc = home.appendingPathComponent(".zshrc")
-
-        guard let contents = try? String(contentsOf: zshrc, encoding: .utf8) else {
-            return [:]
-        }
-
-        let raw = parseExports(contents)
-        let resolved = resolve(raw, home: home)
+        let env = ProcessInfo.processInfo.environment
+        let zshrc = Self.scanZshrc(home: home)
 
         var out: [GMCCEnvKey: String] = [:]
         for key in GMCCEnvKey.allCases {
-            if let value = resolved[key.rawValue] {
+            if let value = env[key.rawValue], !value.isEmpty {
+                out[key] = value
+            } else if let value = zshrc[key], !value.contains("$") {
+                // A value still containing "$" references a variable the
+                // single-purpose scan couldn't expand — drop it so the
+                // conventional-location probe below takes over instead of
+                // surfacing a garbage literal path.
                 out[key] = value
             }
         }
-        return out
+        // Conventional-location probe: the standard install puts the ckfs at
+        // ~/gmcc_ckfs (and kbites under it).
+        if out[.ckfsRoot] == nil {
+            let conventional = home.appendingPathComponent("gmcc_ckfs")
+            if FileManager.default.fileExists(atPath: conventional.path) {
+                out[.ckfsRoot] = conventional.path
+            }
+        }
+        if let root = out[.ckfsRoot] {
+            let kbites = URL(fileURLWithPath: root).appendingPathComponent("kbites")
+            if out[.kbiteDigested] == nil {
+                let digested = kbites.appendingPathComponent("digested")
+                if FileManager.default.fileExists(atPath: digested.path) {
+                    out[.kbiteDigested] = digested.path
+                }
+            }
+            if out[.kbiteOpen] == nil {
+                let open = kbites.appendingPathComponent("open")
+                if FileManager.default.fileExists(atPath: open.path) {
+                    out[.kbiteOpen] = open.path
+                }
+            }
+        }
+        if values != out { values = out }
     }
 
-    private static func parseExports(_ contents: String) -> [String: String] {
-        let knownKeys = Set(GMCCEnvKey.allCases.map(\.rawValue))
-        let pattern = /^\s*export\s+([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$/
+    /// Minimal single-purpose scan: `export GMCC_*=...` lines only, with `~`
+    /// and `$HOME`/`$GMCC_CKFS_ROOT` expansion — not a shell interpreter.
+    private static func scanZshrc(home: URL) -> [GMCCEnvKey: String] {
+        let zshrc = home.appendingPathComponent(".zshrc")
+        guard let contents = try? String(contentsOf: zshrc, encoding: .utf8) else { return [:] }
 
+        let pattern = /^\s*export\s+([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$/
         var raw: [String: String] = [:]
         for rawLine in contents.split(whereSeparator: \.isNewline) {
             let line = String(rawLine)
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("#") { continue }
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("#") { continue }
             guard let match = try? pattern.firstMatch(in: line) else { continue }
-
-            let name = String(match.output.1)
-            guard knownKeys.contains(name) else { continue }
-
-            raw[name] = stripQuotes(String(match.output.2))
+            raw[String(match.output.1)] = stripQuotes(String(match.output.2))
         }
-        return raw
-    }
 
-    private static func resolve(_ raw: [String: String], home: URL) -> [String: String] {
-        var resolved: [String: String] = ["HOME": home.path]
-        let names = raw.keys
-
-        for _ in 0..<8 {
-            var changed = false
-            for name in names {
-                guard let rawValue = raw[name] else { continue }
-                let expanded = expand(rawValue, vars: resolved, home: home)
-                if resolved[name] != expanded {
-                    resolved[name] = expanded
-                    changed = true
-                }
+        var out: [GMCCEnvKey: String] = [:]
+        // ckfsRoot first, then GMCC_KBITE (a common intermediate the kbite
+        // keys reference even though it's no longer surfaced as a key).
+        var expansions = ["HOME": home.path]
+        if let root = raw[GMCCEnvKey.ckfsRoot.rawValue].map({ expand($0, vars: expansions, home: home) }) {
+            out[.ckfsRoot] = root
+            expansions[GMCCEnvKey.ckfsRoot.rawValue] = root
+        }
+        if let kbite = raw["GMCC_KBITE"].map({ expand($0, vars: expansions, home: home) }) {
+            expansions["GMCC_KBITE"] = kbite
+        }
+        for key in GMCCEnvKey.allCases where key != .ckfsRoot {
+            if let value = raw[key.rawValue] {
+                out[key] = expand(value, vars: expansions, home: home)
             }
-            if !changed { break }
         }
-        return resolved
+        return out
     }
 
     private static func stripQuotes(_ s: String) -> String {
@@ -121,17 +115,12 @@ final class GMCCEnvironment {
 
     private static func expand(_ value: String, vars: [String: String], home: URL) -> String {
         var out = value
-
         if out == "~" {
             out = home.path
         } else if out.hasPrefix("~/") {
             out = home.appendingPathComponent(String(out.dropFirst(2))).path
         }
-
-        // Longest names first so $GMCC_KBITE_DIGESTED isn't shadowed by $GMCC_KBITE.
-        let sortedNames = vars.keys.sorted { $0.count > $1.count }
-        for name in sortedNames {
-            guard let replacement = vars[name] else { continue }
+        for (name, replacement) in vars.sorted(by: { $0.key.count > $1.key.count }) {
             out = out.replacingOccurrences(of: "${\(name)}", with: replacement)
             out = out.replacingOccurrences(of: "$\(name)", with: replacement)
         }

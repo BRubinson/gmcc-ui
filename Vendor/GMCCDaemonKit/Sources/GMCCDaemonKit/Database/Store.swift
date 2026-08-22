@@ -16,6 +16,10 @@ public enum StoreError: Error, Sendable {
     /// A request whose payload decoded fine but is semantically unusable
     /// (e.g. a whitespace-only search query).
     case badRequest(detail: String)
+    /// Generic status-machine violation for the non-prompt entities
+    /// (clarification_summary, architecture_summary). Maps onto the SAME wire
+    /// code as the prompt-typed case — no new ErrorCode needed.
+    case invalidEntityTransition(entity: String, from: String, to: String, reason: String?)
 
     public var errorPayload: ErrorPayload {
         switch self {
@@ -43,6 +47,11 @@ public enum StoreError: Error, Sendable {
                 message: "\(entity) holds an impossible value: \(detail)")
         case .badRequest(let detail):
             return ErrorPayload(code: .badRequest, message: detail)
+        case .invalidEntityTransition(let entity, let from, let to, let reason):
+            let suffix = reason.map { " (\($0))" } ?? ""
+            return ErrorPayload(
+                code: .invalidTransition,
+                message: "illegal \(entity) transition \(from) → \(to)\(suffix)")
         }
     }
 }
@@ -112,6 +121,79 @@ public final class Store: @unchecked Sendable {
 
     static func newUuid() -> String {
         UUID().uuidString.lowercased()
+    }
+
+    /// The lifecycle-v2 epoch: applied_at of m0002's schema_migrations row.
+    /// A prompt whose created_at predates it has no db-native
+    /// clarification/architecture history and never will (the contract
+    /// forbids fabricating backing rows), so forward gates pass vacuously and
+    /// create-on-enter is suppressed for it. Lexicographic comparison is
+    /// chronological — every timestamp comes from isoNow(). Cached per Store
+    /// (the value never changes after the migration runs); reads happen only
+    /// inside dbQueue turns, which serializes access.
+    private var lifecycleEpochCache: String??
+
+    func isLegacyPrompt(_ db: Database, createdAt: String) throws -> Bool {
+        if lifecycleEpochCache == nil {
+            lifecycleEpochCache = .some(try String.fetchOne(
+                db, sql: "SELECT applied_at FROM schema_migrations WHERE version = 2"))
+        }
+        guard let epoch = lifecycleEpochCache ?? nil else { return false }
+        return createdAt < epoch
+    }
+
+    /// Advance a session's recency WITHOUT bumping its version — deliberately
+    /// not updateBase. Prompt/file-change writes advancing updated_at must
+    /// never invalidate a session version an editor is holding (spurious
+    /// VERSION_CONFLICTs in the GMVibes session editor). The one place
+    /// updated_at and version are not in lockstep.
+    func touchSession(_ db: Database, uuid: String) throws {
+        try db.execute(
+            sql: "UPDATE session SET updated_at = ? WHERE uuid = ?",
+            arguments: [Store.isoNow(), uuid])
+    }
+
+    /// The comparison feature's join key contract: architecture change rows
+    /// and file_change rows meet on this string, so both write paths run
+    /// through this one normalizer. Purely lexical — NEVER touches the
+    /// filesystem (live instance roots include paths that no longer exist,
+    /// and architecture rows name files that don't exist yet).
+    ///
+    /// Relative paths are anchored by definition and pass through cleaned; an
+    /// absolute path inside the instance root is stripped to repo-relative;
+    /// an absolute path outside it is rejected (honest failure over a
+    /// silently zero-match join).
+    static func normalizeRepoRelativePath(_ raw: String, repoRoot: String) throws -> String {
+        var path = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else {
+            throw StoreError.badRequest(detail: "file path is empty")
+        }
+        guard !path.contains("\0"), !path.contains("\n") else {
+            throw StoreError.badRequest(detail: "file path contains control characters")
+        }
+        if path.hasPrefix("~/") {
+            path = NSHomeDirectory() + String(path.dropFirst(1))
+        }
+        if path.hasPrefix("/") {
+            var root = repoRoot
+            while root.hasSuffix("/") { root = String(root.dropLast()) }
+            guard root.count > 1, path == root || path.hasPrefix(root + "/") else {
+                throw StoreError.badRequest(
+                    detail: "path is not inside the instance root (\(repoRoot)): \(raw)")
+            }
+            path = String(path.dropFirst(root.count))
+            if path.hasPrefix("/") { path = String(path.dropFirst()) }
+        }
+        while path.hasPrefix("./") { path = String(path.dropFirst(2)) }
+        while path.contains("//") { path = path.replacingOccurrences(of: "//", with: "/") }
+        let segments = path.split(separator: "/")
+        guard !segments.contains("..") else {
+            throw StoreError.badRequest(detail: "path escapes the repo root: \(raw)")
+        }
+        guard !path.isEmpty, path != "/" else {
+            throw StoreError.badRequest(detail: "path resolves to the repo root: \(raw)")
+        }
+        return path
     }
 
     /// daemon_event.payload is documented as JSON — always build it with a
@@ -227,17 +309,17 @@ public final class Store: @unchecked Sendable {
         }
     }
 
-    public func tableCounts() throws -> [String: Int] {
+    public func tableCounts() throws -> [TableCount] {
         try dbQueue.read { db in
             let tables = try String.fetchAll(db, sql: """
                 SELECT name FROM sqlite_master
                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != 'grdb_migrations'
+                ORDER BY name
                 """)
-            var counts: [String: Int] = [:]
-            for table in tables {
-                counts[table] = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table)") ?? 0
+            return try tables.map { table in
+                TableCount(name: table,
+                           count: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table)") ?? 0)
             }
-            return counts
         }
     }
 

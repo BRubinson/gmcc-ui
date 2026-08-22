@@ -20,6 +20,11 @@ nonisolated enum CkfsPathResolver {
 
     /// Slug rule shared with prompt codes (mirrors the historical folder
     /// segment rule; also used by CreatePromptView's code preview).
+    ///
+    /// WARNING: this is NOT the session-code rule. `session.code` is derived
+    /// from the branch with ONLY `/` → `__` (no case/punctuation folding) —
+    /// use `GitSlug.sessionCode(forBranch:)` for branch comparison, or a
+    /// branch like `Feature/Login` will silently never match its session.
     static func slug(_ name: String) -> String {
         let lower = name.lowercased()
         var out = ""

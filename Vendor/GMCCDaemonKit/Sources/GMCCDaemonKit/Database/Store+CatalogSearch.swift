@@ -43,8 +43,15 @@ extension Store {
             // instances, in one query (project scope rides the join — session has
             // no project_uuid column).
             var sessionSql = """
-                SELECT s.uuid, s.version, s.instance_uuid, s.code, s.name, s.status,
-                       s.ckfs_relative_storage_path, s.created_at, s.updated_at
+                SELECT s.uuid, s.version, s.instance_uuid, s.code, s.name,
+                       s.ckfs_relative_storage_path, s.created_at, s.updated_at,
+                       MAX(
+                           s.updated_at,
+                           COALESCE((SELECT MAX(p.updated_at) FROM prompt p
+                                     WHERE p.session_uuid = s.uuid), ''),
+                           COALESCE((SELECT MAX(fc.created_at) FROM file_change fc
+                                     WHERE fc.session_uuid = s.uuid), '')
+                       ) AS last_activity_at
                 FROM session s
                 JOIN instance i ON i.uuid = s.instance_uuid
                 """
@@ -61,19 +68,7 @@ extension Store {
             sessionSql += " LIMIT \(limit)"
             let sessions = try Row.fetchAll(
                 db, sql: sessionSql, arguments: StatementArguments(sessionArguments)
-            ).map { row in
-                SessionStub(
-                    uuid: row["uuid"],
-                    version: row["version"],
-                    instanceUuid: row["instance_uuid"],
-                    code: row["code"],
-                    name: row["name"],
-                    status: row["status"],
-                    ckfsRelativeStoragePath: row["ckfs_relative_storage_path"],
-                    createdAt: row["created_at"],
-                    updatedAt: row["updated_at"]
-                )
-            }
+            ).map { self.sessionStub(from: $0) }
 
             // Instances: the parent closure of every returned session, plus
             // instances that matched directly (kept even when they contribute no

@@ -24,6 +24,23 @@ nonisolated enum DaemonError: Error, Equatable {
     /// Wire-level encode/decode/socket failure.
     case transport(String)
 
+    /// The single user-facing description. Screens that need context-specific
+    /// wording (e.g. search) may special-case a few cases and fall back here.
+    var userMessage: String {
+        switch self {
+        case .notInstalled: return "Daemon not installed (run build_daemon.sh)."
+        case .unreachable(let m): return m
+        case .clientTooOld(let v): return "Daemon (wire v\(v)) is newer than this app — rebuild GMVibes."
+        case .daemonTooOld(_, let m): return m
+        case .notFound: return "Not in the GMCC database yet — run /import_legacy_yaml_gmcc."
+        case .versionConflict: return "Edited elsewhere — reload to continue."
+        case .invalidTransition: return "That status change isn't allowed."
+        case .contentLocked: return "Content is locked."
+        case .server(let code, let message): return "\(code): \(message)"
+        case .transport(let m): return m
+        }
+    }
+
     init(_ error: Error) {
         if let already = error as? DaemonError {
             self = already

@@ -1,57 +1,9 @@
 import SwiftUI
 import GMCCDaemonKit
 
-/// Live daemon health dot + detail popover. Hosted in Landing's BrandBar and
-/// (as a toolbar item) in feature windows.
-struct DaemonStatusIndicator: View {
-    @Environment(DaemonConnectionModel.self) private var daemon
-    @State private var showPopover = false
-
-    var body: some View {
-        Button {
-            showPopover.toggle()
-        } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 9, height: 9)
-                Text(shortLabel)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("GMCC daemon status")
-        .popover(isPresented: $showPopover, arrowEdge: .bottom) {
-            DaemonStatusPopover()
-                .environment(daemon)
-        }
-    }
-
-    private var color: Color {
-        switch daemon.health {
-        case .up: return .green
-        case .down: return .red
-        case .notInstalled: return .gray
-        case .incompatible: return .orange
-        case .starting: return .yellow
-        case .unknown: return .gray.opacity(0.5)
-        }
-    }
-
-    private var shortLabel: String {
-        switch daemon.health {
-        case .up: return "daemon"
-        case .down: return "daemon down"
-        case .notInstalled: return "not installed"
-        case .incompatible: return "update needed"
-        case .starting: return "starting…"
-        case .unknown: return "daemon…"
-        }
-    }
-}
-
+// The old dot-style DaemonStatusIndicator is gone — the top bar's
+// GmccDaemonStatus pill (Chrome/GmccDaemonStatus.swift) is the single status
+// control, and it reuses this popover verbatim.
 struct DaemonStatusPopover: View {
     @Environment(DaemonConnectionModel.self) private var daemon
 
@@ -134,8 +86,8 @@ struct DaemonStatusPopover: View {
         if let counts = daemon.status?.tableCounts, !counts.isEmpty {
             Divider()
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 2) {
-                ForEach(counts.sorted(by: { $0.key < $1.key }), id: \.key) { key, value in
-                    row(key, "\(value)")
+                ForEach(counts, id: \.name) { table in
+                    row(table.name, "\(table.count)")
                 }
             }
             .font(.caption2.monospaced())

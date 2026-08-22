@@ -4,7 +4,7 @@ struct KBiteMarkdownView: View {
     let url: URL
     var showOpenInWindow: Bool = true
     // When set + active, the body renders as highlighted plain text (find-in-page)
-    // instead of block markdown — mirroring the Yeet reader's search behavior.
+    // instead of block markdown.
     var findQuery: SearchQuery = SearchQuery("")
 
     @Environment(\.openWindow) private var openWindow
@@ -25,7 +25,7 @@ struct KBiteMarkdownView: View {
                 Spacer()
                 if showOpenInWindow {
                     Button {
-                        openWindow(id: "kbite-md", value: url)
+                        openWindow(value: WindowSeed(.kbiteFile(url)))
                     } label: {
                         Label("Open in Window", systemImage: "macwindow.badge.plus")
                     }
@@ -50,7 +50,7 @@ struct KBiteMarkdownView: View {
         switch KBiteMarkdown.preview(for: url) {
         case .markdown(let blocks, let source):
             if findQuery.isActive {
-                // While searching, show highlighted plain text (matches Yeet).
+                // While searching, show highlighted plain text.
                 HighlightedText(source: source, query: findQuery, activeLocalOccurrence: nil)
             } else {
                 MarkdownBlocksView(blocks)

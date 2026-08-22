@@ -28,7 +28,6 @@ extension Store {
             if let name = req.name { set["name"] = name }
             if let backstory = req.backstory { set["backstory"] = backstory }
             if let goal = req.goal { set["goal"] = goal }
-            if let status = req.status { set["status"] = status.rawValue }
             guard !set.isEmpty else {
                 throw StoreError.emptyUpdate(entity: "session")
             }
@@ -51,7 +50,7 @@ extension Store {
         guard let row = try Row.fetchOne(
             db,
             sql: """
-                SELECT uuid, version, code, name, backstory, goal, status, created_at, updated_at
+                SELECT uuid, version, code, name, backstory, goal, created_at, updated_at
                 FROM session WHERE uuid = ?
                 """,
             arguments: [uuid]
@@ -63,7 +62,6 @@ extension Store {
             name: row["name"],
             backstory: row["backstory"],
             goal: row["goal"],
-            status: row["status"],
             createdAt: row["created_at"],
             updatedAt: row["updated_at"]
         )
@@ -76,13 +74,15 @@ extension Store {
         let arguments: StatementArguments
         if let sessionUuid {
             sql = """
-                SELECT uuid, session_uuid, seq, code, name, status, version
+                SELECT uuid, session_uuid, seq, code, name, status, version,
+                       ckfs_relative_storage_path, created_at, updated_at
                 FROM prompt WHERE session_uuid = ? ORDER BY seq
                 """
             arguments = [sessionUuid]
         } else {
             sql = """
-                SELECT uuid, session_uuid, seq, code, name, status, version
+                SELECT uuid, session_uuid, seq, code, name, status, version,
+                       ckfs_relative_storage_path, created_at, updated_at
                 FROM prompt ORDER BY session_uuid, seq
                 """
             arguments = []
@@ -95,7 +95,10 @@ extension Store {
                 code: row["code"],
                 name: row["name"],
                 status: row["status"],
-                version: row["version"]
+                version: row["version"],
+                ckfsRelativeStoragePath: row["ckfs_relative_storage_path"],
+                createdAt: row["created_at"],
+                updatedAt: row["updated_at"]
             )
         }
     }

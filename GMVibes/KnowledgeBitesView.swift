@@ -1,6 +1,21 @@
 import SwiftUI
 import GMCCDaemonKit
 
+/// KBites route host. KnowledgeBitesView is a TabView with a toolbar but no
+/// navigation container of its own, so wrap it in a NavigationStack so the
+/// title/toolbar host; the wrapper also owns the view-local KBiteStore.
+struct KBitesScene: View {
+    @State private var store = KBiteStore()
+
+    var body: some View {
+        NavigationStack {
+            KnowledgeBitesView()
+                .environment(store)
+        }
+        .frame(minWidth: 760, minHeight: 480)
+    }
+}
+
 struct KnowledgeBitesView: View {
     @Environment(GMCCEnvironment.self) private var gmcc
     @Environment(KBiteStore.self) private var store
@@ -28,9 +43,6 @@ struct KnowledgeBitesView: View {
         }
         .navigationTitle("Knowledge Bites")
         .toolbar {
-            ToolbarItem {
-                DaemonStatusIndicator()
-            }
             ToolbarItem {
                 Button {
                     if let url = rootFolderURL { VSCode.open(url) }
@@ -376,7 +388,7 @@ private struct OpenInWindowButton: View {
 
     var body: some View {
         Button {
-            openWindow(id: "kbite-md", value: url)
+            openWindow(value: WindowSeed(.kbiteFile(url)))
         } label: {
             Label("Open in Window", systemImage: "macwindow.badge.plus")
         }

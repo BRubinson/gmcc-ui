@@ -4,7 +4,7 @@ import SwiftUI
 // one toggleable capsule per available kbite; selected pills are filled with the
 // accent tint, unselected are outlined. Binds to the caller's selection list and
 // keeps it ordered to match `available` for a stable on-disk registry. Wraps via
-// an internal flow layout (mirrors the private FlowLayout in YeetDocumentView).
+// an internal flow layout.
 struct KBitePillBox: View {
     let available: [String]
     @Binding var selected: [String]
@@ -18,7 +18,7 @@ struct KBitePillBox: View {
                     .font(.caption2.monospaced()).foregroundStyle(.tertiary)
             }
             if available.isEmpty {
-                Text("No kbites found in $GMCC_KBITE_DIGESTED.")
+                Text("No kbites in the GMCC database yet.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {

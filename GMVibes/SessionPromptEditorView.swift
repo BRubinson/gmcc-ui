@@ -5,7 +5,7 @@ import GMCCDaemonKit
 // Per-session prompt-authoring screen. Left: a flat navigator of the session's
 // prompts (SESSION_GET / PROMPT_LIST stubs). Right: a three-section code-style
 // editor (backstory / goal / detail) over the selected prompt's daemon row, with
-// version-threaded autosave, SwiftData-backed undo/redo, per-section copy, and a
+// version-threaded autosave, in-memory undo/redo, per-section copy, and a
 // toolbar "Run" button that exports the `/gm_bot {seq}` resume command.
 
 struct SessionPromptEditorView: View {
@@ -13,16 +13,20 @@ struct SessionPromptEditorView: View {
     @Environment(CatalogStore.self) private var catalog
     let windowID: SessionWindowID
 
-    @State private var store: SessionStore
+    @State private var scope: SessionScope
     @State private var selectedUuid: String?
     @State private var didDefaultSelect = false
     @State private var showCreatePrompt = false
     // One list filter over both fields: name + content (all sections).
     @State private var promptQuery = ""
 
+    private var store: SessionStore { scope.store }
+
     init(windowID: SessionWindowID) {
         self.windowID = windowID
-        _store = State(initialValue: SessionStore(sessionUuid: windowID.sessionUUID.wireString))
+        // Create-or-get is side-effect-safe in init; the refcount lease lives
+        // in onAppear/onDisappear, which SwiftUI balances.
+        _scope = State(initialValue: SessionScopeCache.shared.scope(for: windowID.sessionUUID.wireString))
     }
 
     // Instance/project identity resolved from the catalog snapshot.
@@ -56,7 +60,6 @@ struct SessionPromptEditorView: View {
             PromptNavigator(
                 sessionName: windowID.sessionName,
                 instanceName: instanceRow?.name ?? "—",
-                instanceUUID: windowID.instanceUUID,
                 repositoryName: projectRow?.gitRepoName,
                 systemPath: instanceRow.map(\.absoluteFileSystemPath),
                 changeSummary: store.changeSummary,
@@ -78,7 +81,7 @@ struct SessionPromptEditorView: View {
             if let stub = selectedStub {
                 PromptEditorPane(
                     stub: stub,
-                    store: store,
+                    scope: scope,
                     windowID: windowID
                 )
                 // Recreate the pane (fresh editor + history controller) per prompt.
@@ -122,10 +125,10 @@ struct SessionPromptEditorView: View {
             let stream = daemon.hub.stream(for: .session(store.sessionUuid))
             if !catalog.hasLoaded { await catalog.refresh() }
             await store.refresh()
-            daemon.registerSession(store.sessionUuid, promptUuids: Set(store.prompts.map(\.uuid)))
+            scope.registerPrompts(Set(store.prompts.map(\.uuid)), daemon: daemon)
             for await _ in stream {
                 await store.refresh()
-                daemon.registerSession(store.sessionUuid, promptUuids: Set(store.prompts.map(\.uuid)))
+                scope.registerPrompts(Set(store.prompts.map(\.uuid)), daemon: daemon)
             }
         }
         // Keep instance/project identity + path derivations live on renames.
@@ -135,8 +138,19 @@ struct SessionPromptEditorView: View {
                 await catalog.refresh()
             }
         }
-        .onDisappear {
-            daemon.unregisterSession(store.sessionUuid)
+        // The scope lease. `.task` is contractually balanced against view
+        // lifetime (unlike onAppear/onDisappear), so acquire/release can never
+        // go unpaired and retire a scope another window still holds. Keyed on
+        // the session uuid — NOT daemon.generation — so a reconnect resync
+        // doesn't drop and re-acquire the lease.
+        .task(id: scope.sessionUuid) {
+            SessionScopeCache.shared.acquire(scope.sessionUuid)
+            defer { SessionScopeCache.shared.release(scope.sessionUuid) }
+            // Hold until cancellation; the refresh loops live in their own
+            // generation-keyed tasks.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3600))
+            }
         }
     }
 }
@@ -146,7 +160,6 @@ struct SessionPromptEditorView: View {
 private struct PromptNavigator: View {
     let sessionName: String
     let instanceName: String
-    let instanceUUID: UUID
     let repositoryName: String?
     let systemPath: String?
     let changeSummary: ChangeSummary?
@@ -170,15 +183,13 @@ private struct PromptNavigator: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(sessionName).font(.headline)
                     // RepName · instance · system path → session, with path actions.
+                    // Path-open actions live in the toolbar's single "Open in…"
+                    // menu now — the header is identity only.
                     HStack(spacing: 4) {
                         Image(systemName: "internaldrive").font(.caption2)
                         identityText
                         Image(systemName: "arrow.right").font(.caption2)
                         Text(sessionName)
-                        Spacer(minLength: 6)
-                        InstancePathActions(systemPath: systemPath,
-                                            instanceUUID: instanceUUID,
-                                            instanceName: instanceName)
                     }
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -246,10 +257,13 @@ private struct PromptStatusBadge: View {
     private var label: String { status?.rawValue.capitalized ?? "—" }
     private var color: Color {
         switch status {
-        case .draft:      return .orange
-        case .clarifying: return .blue
-        case .clarified:  return .green
-        case .none:       return .gray
+        case .draft:        return .orange
+        case .clarifying:   return .blue
+        case .architecting: return .purple
+        case .implementing: return .teal
+        case .reviewing:    return .indigo
+        case .done:         return .green
+        case .none:         return .gray
         }
     }
 }
@@ -261,11 +275,12 @@ private struct PromptEditorPane: View {
     @Environment(DaemonConnectionModel.self) private var daemon
     @Environment(CatalogStore.self) private var catalog
     let stub: PromptStub
-    let store: SessionStore
+    let scope: SessionScope
     let windowID: SessionWindowID
 
+    private var store: SessionStore { scope.store }
+
     enum Field: Hashable { case backstory, goal, detail }
-    enum Tab: Hashable { case initial, memories }
 
     enum SaveIssue: Equatable {
         case conflict
@@ -299,8 +314,14 @@ private struct PromptEditorPane: View {
     @State private var selectedKbites: [String] = []
     @State private var availableKbites: [String] = []
     @State private var kbiteSuppress = false
-    @State private var tab: Tab = .initial
+    // Memories explorer, hosted as a trailing inspector (the top-bar slot's
+    // control toggles it) — the old Initial/Memories tab bar is gone.
+    @State private var showMemories = false
     @State private var lastSaved = PromptEditHistory.EditState(backstory: "", goal: "", detail: "")
+    /// Highest prompt version THIS pane has written or synchronized to — the
+    /// echo/external discriminator (the shared actor's watermark can't tell a
+    /// peer pane's write from our own echo).
+    @State private var localWatermark: Int64 = 0
     @State private var history = PromptEditHistory()
     @State private var saveTask: Task<Void, Never>?
     @State private var selectedTier: BotTier?
@@ -311,12 +332,17 @@ private struct PromptEditorPane: View {
     @State private var memoriesModel = MemoriesExplorerModel()
     @Environment(\.openWindow) private var openWindow
 
-    init(stub: PromptStub, store: SessionStore, windowID: SessionWindowID) {
+    init(stub: PromptStub, scope: SessionScope, windowID: SessionWindowID) {
         self.stub = stub
-        self.store = store
+        self.scope = scope
         self.windowID = windowID
+        // PANE-owned box under a globally-unique key: each pane's unsaved
+        // draft is its own registry entry (no shared-key eviction, no clobber
+        // between two panes on one prompt — the shared actor version-checks
+        // the second flush instead). No side effects here: registration
+        // happens in load(), so SwiftUI re-running init is harmless.
         _draftBox = State(initialValue: PromptDraftBox(
-            promptKey: "\(windowID.sessionUUID.uuidString)/\(stub.seq)"))
+            promptKey: "\(stub.uuid)#\(UUID().uuidString)"))
     }
 
     private var promptKey: String { draftBox.promptKey }
@@ -333,12 +359,7 @@ private struct PromptEditorPane: View {
     private var findQuery: SearchQuery { find.searchQuery }
 
     private var findSegments: [(id: String, text: String)] {
-        switch tab {
-        case .initial:
-            return [("backstory", backstory), ("goal", goal), ("detail", detail)]
-        case .memories:
-            return []
-        }
+        [("backstory", backstory), ("goal", goal), ("detail", detail)]
     }
 
     private var findMatches: FindMatches {
@@ -357,7 +378,9 @@ private struct PromptEditorPane: View {
         }
     }
 
-    private var supportsFind: Bool { tab == .initial }
+    // While the memories inspector is open, its reader owns ⌘F/⌘G — the pane
+    // publishes nil so the two focused-value publishers never collide.
+    private var supportsFind: Bool { !showMemories }
 
     private func segmentID(_ field: Field) -> String {
         switch field {
@@ -379,14 +402,11 @@ private struct PromptEditorPane: View {
                         .buttonStyle(.bordered)
                 }
             } else if loaded {
-                VStack(spacing: 0) {
-                    tabBar
-                    Divider()
-                    switch tab {
-                    case .initial:  initialTab
-                    case .memories: memoriesTab
+                initialTab
+                    .inspector(isPresented: $showMemories) {
+                        memoriesTab
+                            .inspectorColumnWidth(min: 280, ideal: 340, max: 520)
                     }
-                }
             } else {
                 ProgressView().controlSize(.regular)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -395,7 +415,7 @@ private struct PromptEditorPane: View {
         .navigationTitle(stub.name)
         .navigationSubtitle(PromptStatus(rawValue: stub.status)?.rawValue.capitalized ?? "")
         .toolbar {
-            if tab == .initial && editable {
+            if editable {
                 ToolbarItemGroup {
                     Button { applyUndo() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
                         .disabled(!history.canUndo)
@@ -403,48 +423,45 @@ private struct PromptEditorPane: View {
                         .disabled(!history.canRedo)
                 }
             }
+            // All external open actions folded into ONE menu (was 5 VS Code
+            // buttons + an iTerm button).
             ToolbarItem {
-                DaemonStatusIndicator()
+                Menu {
+                    Button("iTerm at Repo") { openInITerm(paths.repoFolder) }
+                        .disabled(paths.repoFolder == nil)
+                    Divider()
+                    Button("Repo in VS Code") { openInVSCode(paths.repoFolder) }
+                        .disabled(paths.repoFolder == nil)
+                    Button("Project in VS Code") { openInVSCode(paths.projectFolder) }
+                        .disabled(paths.projectFolder == nil)
+                    Button("Instance in VS Code") { openInVSCode(paths.instanceFolder) }
+                        .disabled(paths.instanceFolder == nil)
+                    Button("Session in VS Code") { openInVSCode(paths.sessionFolder) }
+                        .disabled(paths.sessionFolder == nil)
+                    Button("Prompt in VS Code") { openInVSCode(paths.promptFolder) }
+                        .disabled(paths.promptFolder == nil)
+                } label: {
+                    Label("Open in…", systemImage: "arrow.up.forward.app")
+                }
+                .help("Open the repo/project/instance/session/prompt externally")
             }
-            // iTerm: open a terminal rooted at the instance's target repo. Uses a
-            // per-instance Dynamic Profile so spawned windows/tabs inherit the repo dir.
-            ToolbarItemGroup {
-                Button { openInITerm(paths.repoFolder) } label: {
-                    Label("Open in iTerm", systemImage: "terminal")
+            // The top bar's trailing slot: memories access + the tier cluster.
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    if NSEvent.modifierFlags.contains(.command), let root = paths.memoryRoot {
+                        openWindow(value: WindowSeed(.promptMemories(PromptMemoriesWindowID(
+                            memoryRootURL: root,
+                            promptName: stub.name,
+                            selectedFile: memoriesModel.selectedFile,
+                            expanded: Array(memoriesModel.expanded)
+                        ))))
+                    } else {
+                        showMemories.toggle()
+                    }
+                } label: {
+                    Label("Memories", systemImage: "folder")
                 }
-                .disabled(paths.repoFolder == nil)
-                .help("Open an iTerm2 window in the instance's target repo (window cwd = repo, via a per-instance dynamic profile)")
-            }
-            ToolbarItemGroup {
-                Button { openInVSCode(paths.repoFolder) } label: {
-                    Label("Open Repo", systemImage: "hammer")
-                }
-                .disabled(paths.repoFolder == nil)
-                .help("Open the instance's target repo (implementation checkout) in VS Code")
-                Button { openInVSCode(paths.projectFolder) } label: {
-                    Label("Open Project", systemImage: "folder")
-                }
-                .disabled(paths.projectFolder == nil)
-                .help("Open the project folder in VS Code")
-                Button { openInVSCode(paths.instanceFolder) } label: {
-                    Label("Open Instance", systemImage: "internaldrive")
-                }
-                .disabled(paths.instanceFolder == nil)
-                .help("Open the instance folder in VS Code")
-                Button { openInVSCode(paths.sessionFolder) } label: {
-                    Label("Open Session", systemImage: "arrow.triangle.branch")
-                }
-                .disabled(paths.sessionFolder == nil)
-                .help("Open the session folder in VS Code")
-                Button { openInVSCode(paths.promptFolder) } label: {
-                    Label("Open Prompt", systemImage: "chevron.left.forwardslash.chevron.right")
-                }
-                .disabled(paths.promptFolder == nil)
-                .help("Open the prompt folder in VS Code")
-            }
-            // A connected cluster of the bot fidelity tiers. Each button copies
-            // that tier's resume command and stays highlighted as last-clicked.
-            ToolbarItem(placement: .primaryAction) {
+                .help("Memory file explorer — \u{2318}-click to open in a separate window")
                 tierCluster
             }
         }
@@ -465,7 +482,7 @@ private struct PromptEditorPane: View {
                 await resolvePaths()
             }
         }
-        // Status transitions (draft→clarifying→clarified) flip `editable` via
+        // Status transitions (draft→clarifying→…→done) flip `editable` via
         // the stub; adopt the frozen server content only when the buffer is clean.
         .onChange(of: stub.status) { _, _ in
             Task {
@@ -473,18 +490,18 @@ private struct PromptEditorPane: View {
                 await reconcileExternal()
             }
         }
-        // cmd+F: the Initial tab opens the inline find bar. On the Memories tab,
-        // publish nil so the reader's own find handler owns cmd+F.
-        .focusedSceneValue(\.yeetFind, tab == .memories ? nil : {
-            if supportsFind {
-                find.reset()
-                find.isPresented = true
-            }
-        })
-        .onChange(of: tab) { _, _ in
-            find.isPresented = false
-            find.query = ""
+        // cmd+F opens the inline find bar over the three sections; nil while
+        // the memories inspector is open so its reader owns the shortcut.
+        .focusedSceneValue(\.findInPage, showMemories ? nil : {
             find.reset()
+            find.isPresented = true
+        })
+        .onChange(of: showMemories) { _, open in
+            if open {
+                find.isPresented = false
+                find.query = ""
+                find.reset()
+            }
         }
         .onChange(of: focus) { old, new in
             // Flush when leaving a field (only meaningful while editable).
@@ -499,9 +516,10 @@ private struct PromptEditorPane: View {
         }
         .onDisappear {
             saveTask?.cancel()
-            // Unregister FIRST (a hung flush must not strand a registry entry
-            // that later shadows a re-registered pane), then flush through the
-            // reference-backed box — no @State reads after teardown.
+            // Unregister FIRST (a hung flush must not strand a registry entry),
+            // then flush through the reference-backed box — no @State reads
+            // after teardown. Keys are per-pane-unique, so this can never
+            // touch another pane's entry.
             let box = draftBox
             PromptFlushRegistry.shared.unregister(box.promptKey)
             Task { await box.flush() }
@@ -509,69 +527,6 @@ private struct PromptEditorPane: View {
     }
 
     // MARK: Tabs
-
-    private var tabBar: some View {
-        HStack(spacing: 12) {
-            Button {
-                tab = .initial
-            } label: {
-                Label("Initial", systemImage: "doc.text")
-            }
-            .buttonStyle(.bordered)
-            .tint(tab == .initial ? .accentColor : nil)
-            // Memories tab. Plain click switches inline; ⌘-click pops it out into
-            // its own window, handing off the current selection + expansion.
-            Button {
-                if NSEvent.modifierFlags.contains(.command), let root = paths.memoryRoot {
-                    openWindow(value: PromptMemoriesWindowID(
-                        memoryRootURL: root,
-                        promptName: stub.name,
-                        selectedFile: memoriesModel.selectedFile,
-                        expanded: Array(memoriesModel.expanded)
-                    ))
-                } else {
-                    tab = .memories
-                }
-            } label: {
-                Label("Memories", systemImage: "folder")
-            }
-            .buttonStyle(.bordered)
-            .tint(tab == .memories ? .accentColor : nil)
-            .help("Memory file explorer — \u{2318}-click to open in a separate window")
-            statusAdvanceMenu
-            if tab == .initial && !editable {
-                Label("Read-only", systemImage: "lock.fill")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            if let summary = store.promptDetails[stub.uuid]?.changeSummary, summary.changeCount > 0 {
-                Text("\(summary.changeCount) changes · \(summary.distinctFiles) files · \(summary.totalLineSpan) lines")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .help("File changes attributed to this prompt")
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
-    }
-
-    // Forward-only, adjacent-only status advance (PROMPT_SET_STATUS).
-    @ViewBuilder
-    private var statusAdvanceMenu: some View {
-        if let status = PromptStatus(rawValue: stub.status), let next = status.successor {
-            Menu {
-                Button("Advance to \(next.rawValue.capitalized)") {
-                    advanceStatus(to: next)
-                }
-            } label: {
-                Label(status.rawValue.capitalized, systemImage: "arrow.forward.circle")
-                    .font(.caption)
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Advance the prompt status (forward-only)")
-        }
-    }
 
     private var initialTab: some View {
         ScrollViewReader { proxy in
@@ -583,6 +538,14 @@ private struct PromptEditorPane: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         saveIssueBanner
+                        if !editable {
+                            // The initial prompt is read-only once past draft;
+                            // memories (the top-bar slot) are the live surface.
+                            Label("Initial prompt — read-only", systemImage: "lock.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                         KBitePillBox(available: availableKbites, selected: $selectedKbites)
                         sectionEditor("Backstory", field: .backstory, text: $backstory,
                                       minHeight: 90, hint: "Narrative context (inherited from the session).")
@@ -596,8 +559,8 @@ private struct PromptEditorPane: View {
                     .frame(maxWidth: .infinity)
                 }
             }
-            .focusedSceneValue(\.yeetFindNext, readOnlyStep(+1, proxy: proxy))
-            .focusedSceneValue(\.yeetFindPrev, readOnlyStep(-1, proxy: proxy))
+            .focusedSceneValue(\.findNext, readOnlyStep(+1, proxy: proxy))
+            .focusedSceneValue(\.findPrevious, readOnlyStep(-1, proxy: proxy))
         }
     }
 
@@ -734,14 +697,21 @@ private struct PromptEditorPane: View {
         kbiteSuppress = true
         selectedKbites = response.kbiteCodes
         kbiteSuppress = false
-        let newSaver = PromptSaveActor(promptUuid: prompt.uuid, version: prompt.version)
+        // Scope-memoized: panes on the same prompt share one actor for WRITE
+        // SERIALIZATION only. The version argument seeds a fresh actor; an
+        // existing actor's threading is authoritative and is never rewound
+        // here (a stale cached snapshot must not clobber a peer's writes).
+        let newSaver = scope.saver(forPrompt: prompt.uuid, version: prompt.version)
         saver = newSaver
         draftBox.saver = newSaver
-        loadAvailableKbites()
+        // Pane-local echo watermark: the highest version THIS pane has written
+        // or synchronized to. The shared actor's watermark can't distinguish a
+        // peer pane's edit from our own echo — this can.
+        localWatermark = prompt.version
+        await loadAvailableKbites()
         let s = currentState()
         lastSaved = s
         history.load(promptKey: promptKey, current: s)
-        tab = .initial
         // Register with the quit-flush registry (bounded drain on termination).
         PromptFlushRegistry.shared.register(draftBox)
         loaded = true
@@ -834,7 +804,8 @@ private struct PromptEditorPane: View {
         }
         let outcome = await saver.save(backstory: s.backstory, goal: s.goal, detail: s.detail)
         switch outcome {
-        case .saved:
+        case .saved(let version):
+            localWatermark = max(localWatermark, version)
             lastSaved = s
             draftBox.markSaved(s)
             if record { history.record(s) }
@@ -855,18 +826,20 @@ private struct PromptEditorPane: View {
     }
 
     // An UPDATE_PROMPT event arrived for this prompt: the refetched row's
-    // version against the save actor's watermark separates our own echo from a
-    // genuine external edit. Adopt silently only when the buffer is clean.
+    // version against the PANE-LOCAL watermark separates this pane's own echo
+    // from an edit made anywhere else — including a peer pane sharing the same
+    // save actor (whose shared watermark cannot make that distinction).
+    // Adopt silently only when the buffer is clean.
     private func reconcileExternal() async {
         guard loaded, let saver,
               let fresh = store.promptDetails[stub.uuid]?.prompt else { return }
-        let watermark = await saver.lastWrittenVersion
-        guard fresh.version > watermark else { return }   // own echo — drop
+        guard fresh.version > localWatermark else { return }   // own echo — drop
         if currentState() == lastSaved {
             backstory = fresh.backstory
             goal = fresh.goal
             detail = fresh.detail
             lastSaved = currentState()
+            localWatermark = fresh.version
             await saver.adoptVersion(fresh.version)
         } else {
             externalChange = fresh   // never clobber in-flight typing
@@ -883,56 +856,19 @@ private struct PromptEditorPane: View {
         externalChange = nil
         if saveIssue == .conflict { saveIssue = nil }
         history.record(lastSaved)
+        localWatermark = max(localWatermark, fresh.version)
         Task { await saver?.adoptVersion(fresh.version) }
-    }
-
-    // MARK: Status transitions
-
-    private func advanceStatus(to next: PromptStatus) {
-        let expected = store.promptDetails[stub.uuid]?.prompt.version ?? stub.version
-        Task {
-            do {
-                _ = try await GMCCDaemonService.shared.setPromptStatus(PromptSetStatusRequest(
-                    promptUuid: stub.uuid,
-                    expectedVersion: expected,
-                    status: next
-                ))
-                await store.refresh()
-            } catch let error as DaemonError {
-                switch error {
-                case .invalidTransition:
-                    saveIssue = .failed("Status transitions are forward-only and adjacent-only.")
-                case .versionConflict:
-                    await store.refreshPrompt(uuid: stub.uuid)
-                    externalChange = store.promptDetails[stub.uuid]?.prompt
-                    saveIssue = .conflict
-                default:
-                    saveIssue = .failed(String(describing: error))
-                }
-            } catch {
-                saveIssue = .failed(String(describing: error))
-            }
-        }
     }
 
     // MARK: KBites
 
-    // Installed kbites under $GMCC_KBITE_DIGESTED, unioned with the current
-    // selection so an already-registered kbite missing from disk still renders
-    // (and can be deselected).
-    private func loadAvailableKbites() {
-        var names: [String] = []
-        if let digested = gmcc[.kbiteDigested] {
-            let dir = URL(fileURLWithPath: digested, isDirectory: true)
-            let contents = (try? FileManager.default.contentsOfDirectory(
-                at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
-            )) ?? []
-            names = contents.compactMap { url in
-                let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                return isDir ? url.lastPathComponent : nil
-            }
-        }
-        availableKbites = Set(names).union(selectedKbites).sorted()
+    // Every kbite the daemon knows (KBITE_LIST all:true), unioned with the
+    // current selection so an already-registered kbite missing from the db
+    // still renders (and can be deselected).
+    private func loadAvailableKbites() async {
+        let refs = (try? await GMCCDaemonService.shared.listKbites(
+            scope: .prompt, ownerUuid: stub.uuid, all: true)) ?? []
+        availableKbites = Set(refs.map(\.code)).union(selectedKbites).sorted()
     }
 
     // Persist a pill toggle as registry deltas at prompt scope. KBITE_ADD

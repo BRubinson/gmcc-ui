@@ -15,17 +15,6 @@ public struct ProjectRow: Codable, Hashable, Sendable {
     public let createdAt: String
     public let updatedAt: String
 
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case version
-        case gitRepoName = "git_repo_name"
-        case code
-        case name
-        case ckfsRelativeStoragePath = "ckfs_relative_storage_path"
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-    }
-
     public init(
         uuid: String,
         version: Int64,
@@ -60,18 +49,6 @@ public struct InstanceRow: Codable, Hashable, Sendable {
     public let createdAt: String
     public let updatedAt: String
 
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case version
-        case projectUuid = "project_uuid"
-        case code
-        case name
-        case absoluteFileSystemPath = "absolute_file_system_path"
-        case ckfsRelativeStoragePath = "ckfs_relative_storage_path"
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-    }
-
     public init(
         uuid: String,
         version: Int64,
@@ -98,29 +75,21 @@ public struct InstanceRow: Codable, Hashable, Sendable {
 // MARK: - Session
 
 /// Session listing shape — full scalars minus the backstory/goal prose
-/// bodies, which stay behind SESSION_GET.
+/// bodies, which stay behind SESSION_GET. `status` was retired from the wire
+/// at v7 (the column survives but every row has read 'active' forever;
+/// checked-out state is git-derived via SESSION_RESOLVE instead).
+/// `lastActivityAt` is the latest of the session's own updated_at, its
+/// prompts' updated_at, and its file changes' created_at (item 1).
 public struct SessionStub: Codable, Hashable, Sendable {
     public let uuid: String
     public let version: Int64
     public let instanceUuid: String
     public let code: String
     public let name: String
-    public let status: String
     public let ckfsRelativeStoragePath: String
     public let createdAt: String
     public let updatedAt: String
-
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case version
-        case instanceUuid = "instance_uuid"
-        case code
-        case name
-        case status
-        case ckfsRelativeStoragePath = "ckfs_relative_storage_path"
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-    }
+    public let lastActivityAt: String
 
     public init(
         uuid: String,
@@ -128,20 +97,20 @@ public struct SessionStub: Codable, Hashable, Sendable {
         instanceUuid: String,
         code: String,
         name: String,
-        status: String,
         ckfsRelativeStoragePath: String,
         createdAt: String,
-        updatedAt: String
+        updatedAt: String,
+        lastActivityAt: String
     ) {
         self.uuid = uuid
         self.version = version
         self.instanceUuid = instanceUuid
         self.code = code
         self.name = name
-        self.status = status
         self.ckfsRelativeStoragePath = ckfsRelativeStoragePath
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.lastActivityAt = lastActivityAt
     }
 }
 
@@ -152,21 +121,8 @@ public struct SessionRow: Codable, Hashable, Sendable {
     public let name: String
     public let backstory: String
     public let goal: String
-    public let status: String
     public let createdAt: String
     public let updatedAt: String
-
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case version
-        case code
-        case name
-        case backstory
-        case goal
-        case status
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-    }
 
     public init(
         uuid: String,
@@ -175,7 +131,6 @@ public struct SessionRow: Codable, Hashable, Sendable {
         name: String,
         backstory: String,
         goal: String,
-        status: String,
         createdAt: String,
         updatedAt: String
     ) {
@@ -185,7 +140,6 @@ public struct SessionRow: Codable, Hashable, Sendable {
         self.name = name
         self.backstory = backstory
         self.goal = goal
-        self.status = status
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -205,26 +159,11 @@ public struct PromptRow: Codable, Hashable, Sendable {
     public let detail: String
     public let command: String
     public let status: String
+    public let ckfsRelativeStoragePath: String
     public let createdAt: String
     public let updatedAt: String
 
     public var promptStatus: PromptStatus? { PromptStatus(rawValue: status) }
-
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case version
-        case sessionUuid = "session_uuid"
-        case seq
-        case code
-        case name
-        case backstory
-        case goal
-        case detail
-        case command
-        case status
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-    }
 
     public init(
         uuid: String,
@@ -238,6 +177,7 @@ public struct PromptRow: Codable, Hashable, Sendable {
         detail: String,
         command: String,
         status: String,
+        ckfsRelativeStoragePath: String,
         createdAt: String,
         updatedAt: String
     ) {
@@ -252,6 +192,7 @@ public struct PromptRow: Codable, Hashable, Sendable {
         self.detail = detail
         self.command = command
         self.status = status
+        self.ckfsRelativeStoragePath = ckfsRelativeStoragePath
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -269,16 +210,9 @@ public struct PromptStub: Codable, Hashable, Sendable {
     public let name: String
     public let status: String
     public let version: Int64
-
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case sessionUuid = "session_uuid"
-        case seq
-        case code
-        case name
-        case status
-        case version
-    }
+    public let ckfsRelativeStoragePath: String
+    public let createdAt: String
+    public let updatedAt: String
 
     public init(
         uuid: String,
@@ -287,7 +221,10 @@ public struct PromptStub: Codable, Hashable, Sendable {
         code: String,
         name: String,
         status: String,
-        version: Int64
+        version: Int64,
+        ckfsRelativeStoragePath: String,
+        createdAt: String,
+        updatedAt: String
     ) {
         self.uuid = uuid
         self.sessionUuid = sessionUuid
@@ -296,6 +233,9 @@ public struct PromptStub: Codable, Hashable, Sendable {
         self.name = name
         self.status = status
         self.version = version
+        self.ckfsRelativeStoragePath = ckfsRelativeStoragePath
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
     }
 }
 
@@ -310,15 +250,6 @@ public struct ArtifactRow: Codable, Hashable, Sendable {
     public let createdAt: String
 
     public var artifactKind: ArtifactKind? { ArtifactKind(rawValue: kind) }
-
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case promptUuid = "prompt_uuid"
-        case filePath = "file_path"
-        case kind
-        case note
-        case createdAt = "created_at"
-    }
 
     public init(uuid: String, promptUuid: String, filePath: String, kind: String, note: String?, createdAt: String) {
         self.uuid = uuid
@@ -336,11 +267,6 @@ public struct ChangeRangeRow: Codable, Hashable, Sendable {
     public let lineStart: Int
     public let lineEnd: Int
 
-    private enum CodingKeys: String, CodingKey {
-        case lineStart = "line_start"
-        case lineEnd = "line_end"
-    }
-
     public init(lineStart: Int, lineEnd: Int) {
         self.lineStart = lineStart
         self.lineEnd = lineEnd
@@ -355,16 +281,6 @@ public struct FileChangeRow: Codable, Hashable, Sendable {
     public let changeKind: String
     public let createdAt: String
     public let ranges: [ChangeRangeRow]
-
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case sessionUuid = "session_uuid"
-        case promptUuid = "prompt_uuid"
-        case relativePath = "relative_path"
-        case changeKind = "change_kind"
-        case createdAt = "created_at"
-        case ranges
-    }
 
     public init(
         uuid: String,
@@ -405,14 +321,6 @@ public struct KbiteRow: Codable, Hashable, Sendable {
     public let createdAt: String
     public let updatedAt: String
 
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case version
-        case code
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-    }
-
     public init(uuid: String, version: Int64, code: String, createdAt: String, updatedAt: String) {
         self.uuid = uuid
         self.version = version
@@ -432,16 +340,6 @@ public struct KbiteResourceRow: Codable, Hashable, Sendable {
     public let resourceType: String
     public let resourceTrust: Int
     public let files: [KbiteResourceFileStub]
-
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case kbiteUuid = "kbite_uuid"
-        case resourceName = "resource_name"
-        case resourceSummary = "resource_summary"
-        case resourceType = "resource_type"
-        case resourceTrust = "resource_trust"
-        case files
-    }
 
     public init(
         uuid: String,
@@ -470,13 +368,6 @@ public struct KbiteResourceFileStub: Codable, Hashable, Sendable {
     public let resourceFileSummary: String
     public let hasContent: Bool
 
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case resourceFileName = "resource_file_name"
-        case resourceFileSummary = "resource_file_summary"
-        case hasContent = "has_content"
-    }
-
     public init(uuid: String, resourceFileName: String, resourceFileSummary: String, hasContent: Bool) {
         self.uuid = uuid
         self.resourceFileName = resourceFileName
@@ -494,15 +385,6 @@ public struct KbiteResourceFileRow: Codable, Hashable, Sendable {
     public let resourceFileSummary: String
     public let resourceFileContent: String?
     public let createdAt: String
-
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case kbiteResourceUuid = "kbite_resource_uuid"
-        case resourceFileName = "resource_file_name"
-        case resourceFileSummary = "resource_file_summary"
-        case resourceFileContent = "resource_file_content"
-        case createdAt = "created_at"
-    }
 
     public init(
         uuid: String,
@@ -533,17 +415,6 @@ public struct KbiteSearchHit: Codable, Hashable, Sendable {
     public let matchedKeywords: [String]
     public let score: Double
 
-    private enum CodingKeys: String, CodingKey {
-        case kbiteCode = "kbite_code"
-        case kbiteUuid = "kbite_uuid"
-        case resourceName = "resource_name"
-        case fileUuid = "file_uuid"
-        case fileName = "file_name"
-        case fileSummary = "file_summary"
-        case matchedKeywords = "matched_keywords"
-        case score
-    }
-
     public init(
         kbiteCode: String,
         kbiteUuid: String,
@@ -572,12 +443,6 @@ public struct ChangeSummary: Codable, Hashable, Sendable {
     public let distinctFiles: Int
     public let totalLineSpan: Int
 
-    private enum CodingKeys: String, CodingKey {
-        case changeCount = "change_count"
-        case distinctFiles = "distinct_files"
-        case totalLineSpan = "total_line_span"
-    }
-
     public init(changeCount: Int, distinctFiles: Int, totalLineSpan: Int) {
         self.changeCount = changeCount
         self.distinctFiles = distinctFiles
@@ -590,13 +455,239 @@ public struct PromptChangeSummary: Codable, Hashable, Sendable {
     public let promptUuid: String?
     public let summary: ChangeSummary
 
-    private enum CodingKeys: String, CodingKey {
-        case promptUuid = "prompt_uuid"
-        case summary
-    }
-
     public init(promptUuid: String?, summary: ChangeSummary) {
         self.promptUuid = promptUuid
         self.summary = summary
+    }
+}
+
+// MARK: - Clarification (v7)
+
+public struct ClarificationSummaryRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let version: Int64
+    public let promptUuid: String
+    public let status: String
+    public let backstoryNote: String
+    public let refinedGoal: String
+    public let refinedDetail: String
+    public let createdAt: String
+    public let updatedAt: String
+
+    public var clarificationStatus: ClarificationStatus? { ClarificationStatus(rawValue: status) }
+
+    public init(
+        uuid: String,
+        version: Int64,
+        promptUuid: String,
+        status: String,
+        backstoryNote: String,
+        refinedGoal: String,
+        refinedDetail: String,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.uuid = uuid
+        self.version = version
+        self.promptUuid = promptUuid
+        self.status = status
+        self.backstoryNote = backstoryNote
+        self.refinedGoal = refinedGoal
+        self.refinedDetail = refinedDetail
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct ClarificationRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let version: Int64
+    public let clarificationSummaryUuid: String
+    public let seq: Int64
+    public let category: String
+    public let question: String
+    public let answer: String?
+    public let answerSource: String?
+    public let status: String
+
+    public init(
+        uuid: String,
+        version: Int64,
+        clarificationSummaryUuid: String,
+        seq: Int64,
+        category: String,
+        question: String,
+        answer: String?,
+        answerSource: String?,
+        status: String
+    ) {
+        self.uuid = uuid
+        self.version = version
+        self.clarificationSummaryUuid = clarificationSummaryUuid
+        self.seq = seq
+        self.category = category
+        self.question = question
+        self.answer = answer
+        self.answerSource = answerSource
+        self.status = status
+    }
+}
+
+// MARK: - Architecture (v7)
+
+public struct ArchitectureSummaryRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let version: Int64
+    public let promptUuid: String
+    public let body: String
+    public let status: String
+    public let createdAt: String
+    public let updatedAt: String
+
+    public var architectureStatus: ArchitectureStatus? { ArchitectureStatus(rawValue: status) }
+
+    public init(
+        uuid: String,
+        version: Int64,
+        promptUuid: String,
+        body: String,
+        status: String,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.uuid = uuid
+        self.version = version
+        self.promptUuid = promptUuid
+        self.body = body
+        self.status = status
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+/// Implementation-state decoration on a planned change row — DERIVED from the
+/// path join against file_change at read time, never stored, so it can never
+/// go stale. fileChangeCount 0 = planned but untouched.
+public struct ChangeImplementationState: Codable, Hashable, Sendable {
+    public let fileChangeCount: Int
+    public let firstChangedAt: String?
+    public let lastChangedAt: String?
+
+    public init(fileChangeCount: Int, firstChangedAt: String?, lastChangedAt: String?) {
+        self.fileChangeCount = fileChangeCount
+        self.firstChangedAt = firstChangedAt
+        self.lastChangedAt = lastChangedAt
+    }
+}
+
+public struct ArchPersistenceFieldChangeRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let seq: Int64
+    public let fieldName: String
+    public let changeReason: String
+    public let changePurpose: String
+    public let dataType: String
+    public let nullable: Bool
+    public let isForeignKey: Bool
+    public let fkTarget: String?
+    public let isIndexed: Bool
+
+    public init(
+        uuid: String,
+        seq: Int64,
+        fieldName: String,
+        changeReason: String,
+        changePurpose: String,
+        dataType: String,
+        nullable: Bool,
+        isForeignKey: Bool,
+        fkTarget: String?,
+        isIndexed: Bool
+    ) {
+        self.uuid = uuid
+        self.seq = seq
+        self.fieldName = fieldName
+        self.changeReason = changeReason
+        self.changePurpose = changePurpose
+        self.dataType = dataType
+        self.nullable = nullable
+        self.isForeignKey = isForeignKey
+        self.fkTarget = fkTarget
+        self.isIndexed = isIndexed
+    }
+}
+
+public struct ArchPersistenceChangeRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let seq: Int64
+    public let className: String
+    public let filePath: String
+    public let reasonBrief: String
+    public let fields: [ArchPersistenceFieldChangeRow]
+    public let implementation: ChangeImplementationState
+
+    public init(
+        uuid: String,
+        seq: Int64,
+        className: String,
+        filePath: String,
+        reasonBrief: String,
+        fields: [ArchPersistenceFieldChangeRow],
+        implementation: ChangeImplementationState
+    ) {
+        self.uuid = uuid
+        self.seq = seq
+        self.className = className
+        self.filePath = filePath
+        self.reasonBrief = reasonBrief
+        self.fields = fields
+        self.implementation = implementation
+    }
+}
+
+public struct ArchGeneralChangeRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let seq: Int64
+    public let filePath: String
+    public let className: String?
+    public let reasonBrief: String
+    public let changeDepth: String
+    public let changeCode: String
+    public let implementation: ChangeImplementationState
+
+    public init(
+        uuid: String,
+        seq: Int64,
+        filePath: String,
+        className: String?,
+        reasonBrief: String,
+        changeDepth: String,
+        changeCode: String,
+        implementation: ChangeImplementationState
+    ) {
+        self.uuid = uuid
+        self.seq = seq
+        self.filePath = filePath
+        self.className = className
+        self.reasonBrief = reasonBrief
+        self.changeDepth = changeDepth
+        self.changeCode = changeCode
+        self.implementation = implementation
+    }
+}
+
+/// A file this prompt touched that no architecture change row planned —
+/// scope drift, the bucket that accelerates debugging.
+public struct UnplannedChangeRow: Codable, Hashable, Sendable {
+    public let path: String
+    public let changeCount: Int
+    public let firstChangedAt: String
+    public let lastChangedAt: String
+
+    public init(path: String, changeCount: Int, firstChangedAt: String, lastChangedAt: String) {
+        self.path = path
+        self.changeCount = changeCount
+        self.firstChangedAt = firstChangedAt
+        self.lastChangedAt = lastChangedAt
     }
 }

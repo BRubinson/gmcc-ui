@@ -28,8 +28,10 @@ actor PromptSaveActor {
 
     /// Adopt an externally-refreshed row's version as the new expected base
     /// (after the UI accepts a remote change or resolves a conflict).
+    /// MONOTONIC: the actor is shared by every pane on this prompt, so a pane
+    /// holding a stale snapshot must never rewind a peer's version thread.
     func adoptVersion(_ newVersion: Int64) {
-        version = newVersion
+        version = max(version, newVersion)
     }
 
     func save(backstory: String, goal: String, detail: String) async -> Outcome {

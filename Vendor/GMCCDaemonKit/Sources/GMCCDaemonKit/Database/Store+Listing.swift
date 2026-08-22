@@ -67,10 +67,23 @@ extension Store {
 
     public func listSessions(_ req: SessionListRequest) throws -> SessionListResponse {
         try dbQueue.read { db in
+            // Item 1: last_activity_at = latest of the session's own
+            // updated_at, its prompts' updated_at, and its file changes'
+            // created_at — one query, correlated scalar MAXes (a childless
+            // session still sorts by its own recency). ISO-8601 seconds-Z
+            // strings compare lexicographically. Retires GMVibes' client-side
+            // fold over an unfiltered FILE_CHANGE_LIST.
             var sql = """
-                SELECT uuid, version, instance_uuid, code, name, status,
-                       ckfs_relative_storage_path, created_at, updated_at
-                FROM session
+                SELECT s.uuid, s.version, s.instance_uuid, s.code, s.name,
+                       s.ckfs_relative_storage_path, s.created_at, s.updated_at,
+                       MAX(
+                           s.updated_at,
+                           COALESCE((SELECT MAX(p.updated_at) FROM prompt p
+                                     WHERE p.session_uuid = s.uuid), ''),
+                           COALESCE((SELECT MAX(fc.created_at) FROM file_change fc
+                                     WHERE fc.session_uuid = s.uuid), '')
+                       ) AS last_activity_at
+                FROM session s
                 """
             var arguments: StatementArguments = []
             if let instanceUuid = req.instanceUuid {
@@ -79,24 +92,28 @@ extension Store {
                 ) != nil else {
                     throw StoreError.notFound(entity: "instance", key: instanceUuid)
                 }
-                sql += " WHERE instance_uuid = ?"
+                sql += " WHERE s.instance_uuid = ?"
                 arguments = [instanceUuid]
             }
-            sql += " ORDER BY code"
+            sql += " ORDER BY s.code"
             let rows = try Row.fetchAll(db, sql: sql, arguments: arguments)
-            return SessionListResponse(sessions: rows.map { row in
-                SessionStub(
-                    uuid: row["uuid"],
-                    version: row["version"],
-                    instanceUuid: row["instance_uuid"],
-                    code: row["code"],
-                    name: row["name"],
-                    status: row["status"],
-                    ckfsRelativeStoragePath: row["ckfs_relative_storage_path"],
-                    createdAt: row["created_at"],
-                    updatedAt: row["updated_at"]
-                )
-            })
+            return SessionListResponse(sessions: rows.map { self.sessionStub(from: $0) })
         }
+    }
+
+    /// Shared SessionStub materializer for listSessions and
+    /// INSTANCE_CURRENT_SESSION (both select the same column list).
+    func sessionStub(from row: Row) -> SessionStub {
+        SessionStub(
+            uuid: row["uuid"],
+            version: row["version"],
+            instanceUuid: row["instance_uuid"],
+            code: row["code"],
+            name: row["name"],
+            ckfsRelativeStoragePath: row["ckfs_relative_storage_path"],
+            createdAt: row["created_at"],
+            updatedAt: row["updated_at"],
+            lastActivityAt: row["last_activity_at"]
+        )
     }
 }

@@ -17,7 +17,6 @@ final class InvalidationHub {
         case session(String)
         case prompt(String)
         case changes
-        case kbites
     }
 
     private var continuations: [Domain: [UUID: AsyncStream<Void>.Continuation]] = [:]

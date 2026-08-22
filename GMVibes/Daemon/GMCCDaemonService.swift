@@ -95,6 +95,17 @@ actor GMCCDaemonService {
         return try await perform { try $0.getSession(SessionGetRequest(sessionUuid: uuid)) }
     }
 
+    func updateSession(_ request: SessionUpdateRequest) async throws -> SessionRow {
+        let req = SessionUpdateRequest(
+            sessionUuid: Self.normalized(request.sessionUuid),
+            expectedVersion: request.expectedVersion,
+            name: request.name,
+            backstory: request.backstory,
+            goal: request.goal
+        )
+        return try await perform { try $0.updateSession(req) }
+    }
+
     // MARK: - Prompt
 
     func listPrompts(sessionUuid: String) async throws -> [PromptStub] {
@@ -168,9 +179,11 @@ actor GMCCDaemonService {
 
     // MARK: - Kbite
 
-    func listKbites(scope: KbiteScope, ownerUuid: String) async throws -> [KbiteRef] {
+    func listKbites(scope: KbiteScope, ownerUuid: String, all: Bool = false) async throws -> [KbiteRef] {
         let uuid = Self.normalized(ownerUuid)
-        return try await perform { try $0.listKbites(KbiteListRequest(scope: scope, ownerUuid: uuid, all: nil)).kbites }
+        // Server short-circuits scope resolution when all == true, so the
+        // owner uuid is ignored in that mode.
+        return try await perform { try $0.listKbites(KbiteListRequest(scope: scope, ownerUuid: uuid, all: all ? true : nil)).kbites }
     }
 
     func addKbite(scope: KbiteScope, ownerUuid: String, code: String) async throws -> KbiteAddResponse {

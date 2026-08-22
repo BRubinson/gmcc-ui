@@ -7,7 +7,7 @@ import Foundation
 /// rejected — the daemon stays up (an old pinned-Kit GMVibes must never be
 /// able to kill-loop a fresh daemon).
 public enum GMCCWireProtocol {
-    public static let version = 6
+    public static let version = 7
 }
 
 /// Discriminator for every NDJSON message on the socket. One case per spec
@@ -54,6 +54,30 @@ public enum MessageType: String, Codable, Hashable, CaseIterable, Sendable {
     case kbiteKeywordTag = "KBITE_KEYWORD_TAG"
     // Catalog search (instances + sessions, the GMVibes search bar)
     case catalogSearch = "CATALOG_SEARCH"
+    // Clarification machine (v7)
+    case clarifyOpen = "CLARIFY_OPEN"
+    case clarifyAsk = "CLARIFY_ASK"
+    case clarifySeal = "CLARIFY_SEAL"
+    case clarifyAnswer = "CLARIFY_ANSWER"
+    case clarifyReopen = "CLARIFY_REOPEN"
+    case clarifyFinalize = "CLARIFY_FINALIZE"
+    case clarifyGet = "CLARIFY_GET"
+    // Architecture machine (v7)
+    case archOpen = "ARCH_OPEN"
+    case archSummarize = "ARCH_SUMMARIZE"
+    case archPersistAdd = "ARCH_PERSIST_ADD"
+    case archFieldAdd = "ARCH_FIELD_ADD"
+    case archGeneralAdd = "ARCH_GENERAL_ADD"
+    case archPropose = "ARCH_PROPOSE"
+    case archApprove = "ARCH_APPROVE"
+    case archRevise = "ARCH_REVISE"
+    case archGet = "ARCH_GET"
+    // Git-state resolution (v7)
+    case sessionResolve = "SESSION_RESOLVE"
+    case instanceCurrentSession = "INSTANCE_CURRENT_SESSION"
+    // Daemon config (v7)
+    case pathsGet = "PATHS_GET"
+    case configSet = "CONFIG_SET"
     // Audit
     case eventList = "EVENT_LIST"
     // Daemon → client only
@@ -75,10 +99,15 @@ public struct RawEnvelopeHead: Codable, Hashable, Sendable {
 
     public var type: MessageType? { MessageType(rawValue: typeRaw) }
 
+    // The one intentional rename ("type" is a Swift keyword-adjacent name kept
+    // raw for forward compat). Sibling keys MUST stay bare cases: an explicit
+    // snake_case raw value stops matching under .convertFromSnakeCase and the
+    // field silently decodes to nil. "type" has no underscore, so it is a
+    // fixed point of both key strategies.
     private enum CodingKeys: String, CodingKey {
-        case protocolVersion = "protocol_version"
+        case protocolVersion
         case typeRaw = "type"
-        case requestId = "request_id"
+        case requestId
     }
 
     public init(protocolVersion: Int, typeRaw: String, requestId: String?) {
@@ -96,12 +125,6 @@ public struct EnvelopeHead: Codable, Hashable, Sendable {
     public let type: MessageType
     public let requestId: String
 
-    private enum CodingKeys: String, CodingKey {
-        case protocolVersion = "protocol_version"
-        case type
-        case requestId = "request_id"
-    }
-
     public init(protocolVersion: Int, type: MessageType, requestId: String) {
         self.protocolVersion = protocolVersion
         self.type = type
@@ -115,13 +138,6 @@ public struct RequestEnvelope<Payload: Codable & Sendable>: Codable, Sendable {
     public let type: MessageType
     public let requestId: String
     public let payload: Payload
-
-    private enum CodingKeys: String, CodingKey {
-        case protocolVersion = "protocol_version"
-        case type
-        case requestId = "request_id"
-        case payload
-    }
 
     public init(type: MessageType, requestId: String = UUID().uuidString.lowercased(), payload: Payload) {
         self.protocolVersion = GMCCWireProtocol.version
@@ -140,15 +156,6 @@ public struct ResponseEnvelope<Payload: Codable & Sendable>: Codable, Sendable {
     public let ok: Bool
     public let payload: Payload?
     public let error: ErrorPayload?
-
-    private enum CodingKeys: String, CodingKey {
-        case protocolVersion = "protocol_version"
-        case type
-        case requestId = "request_id"
-        case ok
-        case payload
-        case error
-    }
 
     public init(
         type: MessageType,
@@ -191,10 +198,14 @@ public struct ErrorPayload: Codable, Hashable, Sendable {
 
     public var code: ErrorCode? { ErrorCode(rawValue: codeRaw) }
 
+    // Same rule as RawEnvelopeHead: only the intentional rename is explicit,
+    // every sibling stays a bare case ("daemon_protocol_version" as a raw
+    // value would silently decode to nil under .convertFromSnakeCase — and
+    // with it the client's directional PROTOCOL_MISMATCH retry).
     private enum CodingKeys: String, CodingKey {
         case codeRaw = "code"
         case message
-        case daemonProtocolVersion = "daemon_protocol_version"
+        case daemonProtocolVersion
     }
 
     public init(code: ErrorCode, message: String, daemonProtocolVersion: Int? = nil) {
@@ -210,14 +221,16 @@ public struct EmptyPayload: Codable, Hashable, Sendable {
 }
 
 /// NDJSON framing helpers: one JSON document per `\n`-terminated line.
+/// Coders come from WireCodec — the snake_case key strategies are the wire's
+/// entire casing contract now that types carry no CodingKeys.
 public enum NDJSON {
     public static func encodeLine<T: Encodable>(_ value: T) throws -> Data {
-        var data = try JSONEncoder().encode(value)
+        var data = try WireCodec.encoder.encode(value)
         data.append(0x0A)
         return data
     }
 
     public static func decode<T: Decodable>(_ type: T.Type, from line: Data) throws -> T {
-        try JSONDecoder().decode(type, from: line)
+        try WireCodec.decoder.decode(type, from: line)
     }
 }

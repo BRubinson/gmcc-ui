@@ -21,8 +21,23 @@ final class CatalogStore {
     private(set) var hasLoaded = false
 
     private let service = GMCCDaemonService.shared
+    private var inFlight: Task<Void, Never>?
 
+    /// Coalesced: this store is process-wide and every window's topology loop
+    /// calls it per invalidation — N windows must still cost three LIST calls,
+    /// not 3N, on the daemon's fairness-free serial queue.
     func refresh() async {
+        if let running = inFlight {
+            await running.value
+            return
+        }
+        let task = Task { await self.performRefresh() }
+        inFlight = task
+        await task.value
+        inFlight = nil
+    }
+
+    private func performRefresh() async {
         do {
             let projects = try await service.listProjects()
             let instances = try await service.listInstances()
@@ -44,7 +59,7 @@ final class CatalogStore {
             if self.instancesByUuid != newInstancesByUuid { self.instancesByUuid = newInstancesByUuid }
             if lastError != nil { lastError = nil }
         } catch let error as DaemonError {
-            lastError = Self.describe(error)
+            lastError = error.userMessage
         } catch {
             lastError = String(describing: error)
         }
@@ -65,15 +80,6 @@ final class CatalogStore {
         instancesByUuid[uuid]
     }
 
-    private static func describe(_ error: DaemonError) -> String {
-        switch error {
-        case .notInstalled: return "Daemon not installed"
-        case .unreachable(let m): return m
-        case .server(let code, let message): return "\(code): \(message)"
-        case .transport(let m): return m
-        default: return String(describing: error)
-        }
-    }
 }
 
 // MARK: - Search matching over kit rows

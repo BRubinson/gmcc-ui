@@ -1,10 +1,9 @@
 import Foundation
 
-// Identity + hand-off payload for a popped-out Memories explorer window. `Codable`
-// so SwiftUI can restore open popouts across launches. Equality / hash are keyed on
-// `memoryRootURL` ALONE, so CMD-clicking the same prompt's Memories tab focuses the
-// existing popout instead of spawning a duplicate (the SessionWindowID precedent).
-// `selectedFile` + `expanded` carry the inline tab's state into the new window.
+// Hand-off payload for the Memories explorer route (`Route.promptMemories`).
+// Plain value semantics — the old memoryRootURL-only equality existed for
+// WindowGroup dedupe, which is gone with the one-window-type collapse.
+// `selectedFile` + `expanded` carry the inline tab's state across.
 struct PromptMemoriesWindowID: Codable, Hashable, Identifiable {
     let memoryRootURL: URL
     let promptName: String
@@ -12,12 +11,4 @@ struct PromptMemoriesWindowID: Codable, Hashable, Identifiable {
     let expanded: [URL]
 
     var id: URL { memoryRootURL }
-
-    static func == (lhs: PromptMemoriesWindowID, rhs: PromptMemoriesWindowID) -> Bool {
-        lhs.memoryRootURL == rhs.memoryRootURL
-    }
-
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(memoryRootURL)
-    }
 }

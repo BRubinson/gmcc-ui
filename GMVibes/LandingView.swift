@@ -2,484 +2,302 @@ import SwiftUI
 import AppKit
 import GMCCDaemonKit
 
-/// App entry point — a CodeEdit-style launcher. Left column of action buttons, right
-/// column of recent projects (each with its newest sessions), and a bottom brand bar.
-/// The gate is daemon reachability: down/not-installed states replace the launcher,
-/// and a healthy daemon with an empty db shows the guided migration state.
+/// App landing page — ForgeApprentice Liquid Glass composition: brand header,
+/// Recent Sessions strip (activity-ranked, checked-out ring), and a
+/// project-organized instance search that navigates to the instance page.
+/// The gate is daemon reachability: down/not-installed states replace the
+/// launcher, and a healthy daemon with an empty db shows the migration state.
 struct LandingView: View {
     @Environment(GMCCEnvironment.self) private var gmcc
     @Environment(DaemonConnectionModel.self) private var daemon
     @Environment(CatalogStore.self) private var catalog
-    @Environment(\.openWindow) private var openWindow
+    @Environment(SessionActivityModel.self) private var activity
+    @Environment(CheckoutWatcher.self) private var checkout
+    @Environment(WindowNav.self) private var nav
 
     @State private var recents = RecentsModel()
-
-    // Global session ordering for the whole landing surface — persisted raw so
-    // the choice survives relaunch. Default: create time (per the prompt).
-    @AppStorage("landing.sessionSort") private var sessionSortRaw: String = SessionSortKey.created.rawValue
-
-    private var sortKey: SessionSortKey {
-        SessionSortKey(rawValue: sessionSortRaw) ?? .created
-    }
+    @State private var showInactiveSessions = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            Group {
-                switch daemon.health {
-                case .up:
-                    if let error = catalog.lastError, catalog.hasLoaded {
-                        // A daemon-up failure (e.g. DB_ERROR after a schema
-                        // re-baseline) must never masquerade as an empty app.
-                        CatalogErrorState(error: error)
-                    } else if catalog.hasLoaded && catalog.projects.isEmpty {
-                        MigrationGateState()
-                    } else {
-                        launcher
-                    }
-                case .unknown, .starting:
-                    ProgressView("Connecting to the GMCC daemon…")
-                case .notInstalled, .down, .incompatible:
-                    DaemonGateState()
+        Group {
+            switch daemon.health {
+            case .up:
+                if let error = catalog.lastError, catalog.hasLoaded {
+                    // A daemon-up failure (e.g. DB_ERROR after a schema
+                    // re-baseline) must never masquerade as an empty app.
+                    CatalogErrorState(error: error)
+                } else if catalog.hasLoaded && catalog.projects.isEmpty {
+                    MigrationGateState()
+                } else {
+                    launcher
                 }
+            case .unknown, .starting:
+                ProgressView("Connecting to the GMCC daemon…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .notInstalled, .down, .incompatible:
+                DaemonGateState()
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            Divider()
-            BrandBar()
         }
-        .frame(minWidth: 760, minHeight: 520)
+        .navigationTitle("GM Vibes")
+        .background(Backdrop())
         // Re-render reactively when daemon health changes mid-session.
         .animation(.default, value: daemon.health)
-        // Event-driven refresh: refetch the catalog on topology invalidations;
-        // generation restarts the loop after a reconnect resync. Stream hoisted
-        // before the first refresh so nothing fired mid-load is lost.
+        // Event-driven refresh (house idiom: streams hoisted first). Topology
+        // reloads the catalog; the .changes domain feeds the activity fold —
+        // its first subscriber. CheckoutWatcher is retargeted after each
+        // catalog refresh so its DispatchSources track the instance set.
         .task(id: daemon.generation) {
-            let stream = daemon.hub.stream(for: .topology)
-            await catalog.refresh()
-            recents.refresh(catalog: catalog, gmcc: gmcc, sortKey: sortKey)
-            for await _ in stream {
-                await catalog.refresh()
-                recents.refresh(catalog: catalog, gmcc: gmcc, sortKey: sortKey)
+            let topology = daemon.hub.stream(for: .topology)
+            await refreshAll()
+            for await _ in topology { await refreshAll() }
+        }
+        .task(id: daemon.generation) {
+            let changes = daemon.hub.stream(for: .changes)
+            for await _ in changes {
+                // Debounce: .changes fires per FILE_CHANGE event, and the
+                // activity listing N+1s per row — a bot implement burst must
+                // coalesce into one refresh, not one per write. Events landing
+                // during the sleep buffer (newest-1) into the next iteration.
+                try? await Task.sleep(for: .milliseconds(750))
+                await activity.refresh()
+                recents.refresh(catalog: catalog, activity: activity)
             }
         }
-        // The sort toggle re-derives immediately (no daemon round-trip needed).
-        .onChange(of: sessionSortRaw) {
-            recents.refresh(catalog: catalog, gmcc: gmcc, sortKey: sortKey)
+        .sheet(isPresented: $showInactiveSessions) {
+            InactiveSessionsSheet()
         }
+    }
+
+    private func refreshAll() async {
+        await catalog.refresh()
+        await activity.refresh()
+        recents.refresh(catalog: catalog, activity: activity)
+        checkout.watch(
+            instances: catalog.instancesByUuid.values.compactMap { row in
+                row.absoluteFileSystemPath.isEmpty
+                    ? nil
+                    : (uuid: row.uuid, repoPath: row.absoluteFileSystemPath)
+            }
+        )
     }
 
     private var launcher: some View {
-        VStack(spacing: 0) {
-            // The env vars no longer gate browsing (the daemon does), but the
-            // Memories tab, kbite roots, and folder-open actions still need
-            // them — warn instead of silently disabling those features.
-            if !gmcc.isLoaded {
-                EnvWarningStrip()
-            }
-            HStack(alignment: .top, spacing: 0) {
-                actionColumn
-                    .frame(width: 300)
-                    .padding(20)
-
-                Divider()
-
-                RecentProjectsColumn(recents: recents.recents,
-                                     sortKeyRaw: $sessionSortRaw) { windowID in
-                    openWindow(value: windowID)
+        ScrollView {
+            VStack(spacing: 28) {
+                // The env vars no longer gate browsing (the daemon does), but
+                // the Memories tab and folder-open actions still need them.
+                if !gmcc.isLoaded {
+                    EnvWarningStrip()
                 }
+
+                BrandHeader()
+
+                RecentSessionsStrip(
+                    sessions: recents.recentSessions,
+                    isCheckedOut: { checkout.isCheckedOut(sessionCode: $0.sessionCode, instanceUuid: $0.instanceUuid) },
+                    onOpen: { nav.go(.session($0.windowID)) }
+                )
+                .frame(maxWidth: 720)
+
+                InstanceSearchSection(
+                    groups: recents.projectGroups,
+                    onOpenInstance: { nav.go(.instance(instanceUuid: $0)) },
+                    onBrowseInactive: { showInactiveSessions = true }
+                )
+                .frame(maxWidth: 720)
+            }
+            .padding(.horizontal, 32)
+            .padding(.vertical, 36)
+            .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+// MARK: - Recent sessions strip
+
+private struct RecentSessionsStrip: View {
+    let sessions: [RecentSessionCard]
+    let isCheckedOut: (RecentSessionCard) -> Bool
+    let onOpen: (RecentSessionCard) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Recent Sessions")
+                .font(.headline)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(20)
-            }
-        }
-    }
 
-    private var actionColumn: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ActionButton(title: "Open Yeet Viewer", systemImage: "doc.text.magnifyingglass") {
-                openWindow(id: "yeet-viewer")
-            }
-            ActionButton(title: "Open KBites", systemImage: "lightbulb") {
-                openWindow(id: "kbites")
-            }
-            ActionButton(title: "New Project", systemImage: "plus.square.on.square") { }
-                .disabled(true)
-            ActionButton(title: "Open Projects", systemImage: "folder") {
-                openWindow(id: "projects")
-            }
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-// MARK: - Left column button
-
-private struct ActionButton: View {
-    let title: String
-    let systemImage: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.title3)
-                    .frame(width: 24)
-                Text(title)
-                    .font(.headline)
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.glass)
-    }
-}
-
-// MARK: - Right column: recent projects
-
-private struct RecentProjectsColumn: View {
-    let recents: [RecentProject]
-    @Binding var sortKeyRaw: String
-    let openSession: (SessionWindowID) -> Void
-
-    private var sortKey: SessionSortKey {
-        SessionSortKey(rawValue: sortKeyRaw) ?? .created
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Recent Projects")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Picker("Sort by", selection: $sortKeyRaw) {
-                    ForEach(SessionSortKey.allCases, id: \.rawValue) { key in
-                        Text(key.label).tag(key.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-            }
-
-            if recents.isEmpty {
-                Text("No recent projects with sessions.")
+            if sessions.isEmpty {
+                Text("No sessions yet.")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 8)
             } else {
-                ScrollView {
-                    GlassEffectContainer(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ForEach(recents) { recent in
-                                RecentProjectCard(recent: recent,
-                                                  sortKey: sortKey,
-                                                  openSession: openSession)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) {
+                        ForEach(sessions) { session in
+                            Button { onOpen(session) } label: {
+                                RecentSessionCardView(session: session, active: isCheckedOut(session))
                             }
+                            .buttonStyle(.plain)
                         }
                     }
+                    .padding(.vertical, 4)
                 }
             }
         }
     }
 }
 
-private struct RecentProjectCard: View {
-    let recent: RecentProject
-    let sortKey: SessionSortKey
-    let openSession: (SessionWindowID) -> Void
+private struct RecentSessionCardView: View {
+    let session: RecentSessionCard
+    let active: Bool
 
-    // Daemon-backed per-project search: the query is debounced into a
-    // CATALOG_SEARCH scoped to this project's uuid; while active, the daemon's
-    // results replace the RecentsModel-derived listing (which is capped to
-    // nothing — all sessions — but the daemon is still the matching authority).
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(session.sessionName)
+                .font(.headline)
+                .lineLimit(1)
+            Text("\(session.projectName) · \(session.instanceName)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            HStack {
+                Text(session.activity.formatted(.relative(presentation: .named)))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                // Bottom-right active dot; hidden (not removed) so state
+                // changes never shift layout.
+                Circle()
+                    .fill(.green)
+                    .frame(width: 8, height: 8)
+                    .opacity(active ? 1 : 0)
+            }
+        }
+        .padding(14)
+        .frame(width: 180, height: 92, alignment: .topLeading)
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .stateBorder(.green, active: active, cornerRadius: 16)
+        .help(active ? "Checked out on this instance's repo" : session.sessionName)
+    }
+}
+
+// MARK: - Project-organized instance search
+
+private struct InstanceSearchSection: View {
+    let groups: [ProjectInstanceGroup]
+    let onOpenInstance: (String) -> Void
+    let onBrowseInactive: () -> Void
+
     @State private var query = ""
-    @State private var results: CatalogSearchResponse?
-    @State private var searching = false
-    @State private var searchError: String?
+
+    private var filtered: [ProjectInstanceGroup] {
+        let q = SearchQuery(query)
+        guard q.isActive else { return groups }
+        return groups.compactMap { group in
+            if q.matchesAny([group.projectName, group.repositoryName ?? ""]) { return group }
+            let hits = group.instances.filter {
+                q.matchesAny([$0.instanceName, $0.code, $0.systemPath ?? ""])
+            }
+            guard !hits.isEmpty else { return nil }
+            return ProjectInstanceGroup(
+                projectUuid: group.projectUuid,
+                projectName: group.projectName,
+                repositoryName: group.repositoryName,
+                instances: hits
+            )
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 12) {
+                CapsuleSearchField(prompt: "Search instances by project, name, or path", text: $query)
+                Button(action: onBrowseInactive) {
+                    Label("Inactive Sessions", systemImage: "archivebox")
+                }
+                .buttonStyle(.glass)
+                .help("Browse non-active sessions across all instances")
+            }
+
+            if filtered.isEmpty {
+                ContentUnavailableView(
+                    query.isEmpty ? "No instances" : "No matches",
+                    systemImage: query.isEmpty ? "folder" : "magnifyingglass",
+                    description: Text(query.isEmpty
+                        ? "The daemon catalog has no instances yet."
+                        : "No instance matches “\(query)”.")
+                )
+                .frame(maxWidth: .infinity, minHeight: 140)
+            } else {
+                VStack(spacing: 16) {
+                    ForEach(filtered) { group in
+                        ProjectGroupCard(group: group, onOpenInstance: onOpenInstance)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ProjectGroupCard: View {
+    let group: ProjectInstanceGroup
+    let onOpenInstance: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Image(systemName: "folder")
-                    .foregroundStyle(.secondary)
-                Text(recent.name)
+                    .foregroundStyle(.orange)
+                Text(group.projectName)
                     .font(.headline)
+                if let repo = group.repositoryName {
+                    Text("·").foregroundStyle(.tertiary)
+                    Text(repo)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
-                searchField
             }
 
-            if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                ForEach(recent.instances) { instance in
-                    InstanceSection(instance: instance, openSession: openSession)
+            VStack(spacing: 8) {
+                ForEach(group.instances) { instance in
+                    Button { onOpenInstance(instance.instanceUuid) } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "internaldrive")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(instance.instanceName)
+                                .font(.subheadline.weight(.medium))
+                            if let path = instance.systemPath {
+                                Text(path)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer()
+                            Text("\(instance.sessionCount) session\(instance.sessionCount == 1 ? "" : "s")")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            Image(systemName: "chevron.right")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .glassEffect(.regular, in: .rect(cornerRadius: 12))
                 }
-            } else {
-                searchResults
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
-        .task(id: query) {
-            let trimmed = query.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty else {
-                results = nil
-                searchError = nil
-                searching = false
-                return
-            }
-            searching = true
-            defer { searching = false }
-            // Debounce: a retype cancels this task before the call fires.
-            try? await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled else { return }
-            do {
-                let response = try await GMCCDaemonService.shared.searchCatalog(
-                    query: trimmed, projectUuid: recent.id.wireString)
-                results = response
-                searchError = nil
-            } catch is CancellationError {
-            } catch let error as DaemonError {
-                results = nil
-                searchError = Self.describe(error)
-            } catch {
-                results = nil
-                searchError = String(describing: error)
-            }
-        }
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "magnifyingglass")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextField("Search sessions", text: $query)
-                .textFieldStyle(.plain)
-                .font(.callout)
-                .frame(width: 160)
-            if !query.isEmpty {
-                Button {
-                    query = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.quaternary.opacity(0.5), in: .capsule)
-    }
-
-    @ViewBuilder
-    private var searchResults: some View {
-        if let searchError {
-            Text(searchError)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } else if let results {
-            let instances = Self.groupedResults(results, recent: recent, sortKey: sortKey)
-            if instances.isEmpty {
-                Text("No matches.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(instances) { instance in
-                    InstanceSection(instance: instance, openSession: openSession)
-                }
-            }
-        } else if searching {
-            ProgressView()
-                .controlSize(.small)
-        }
-    }
-
-    private static let isoFormatter = ISO8601DateFormatter()
-
-    /// Fold a CATALOG_SEARCH response into the card's RecentInstance shape so
-    /// search results render with the exact same section UI (incl. pagination).
-    private static func groupedResults(
-        _ response: CatalogSearchResponse,
-        recent: RecentProject,
-        sortKey: SessionSortKey
-    ) -> [RecentInstance] {
-        let repositoryName = recent.instances.first?.repositoryName
-        let sessionsByInstance = Dictionary(grouping: response.sessions, by: \.instanceUuid)
-        var out: [RecentInstance] = []
-        for row in response.instances {
-            guard let instanceUUID = UUID(uuidString: row.uuid) else { continue }
-            var sessions: [RecentSession] = []
-            for stub in sessionsByInstance[row.uuid] ?? [] {
-                guard let sessionUUID = UUID(uuidString: stub.uuid) else { continue }
-                sessions.append(RecentSession(
-                    windowID: SessionWindowID(
-                        sessionUUID: sessionUUID,
-                        instanceUUID: instanceUUID,
-                        sessionName: stub.name
-                    ),
-                    name: stub.name,
-                    code: stub.code,
-                    branch: CkfsPathResolver.unslugBranch(stub.code),
-                    created: isoFormatter.date(from: stub.createdAt) ?? .distantPast,
-                    updated: isoFormatter.date(from: stub.updatedAt) ?? .distantPast
-                ))
-            }
-            guard !sessions.isEmpty else { continue }
-            sessions.sort { $0.date(for: sortKey) > $1.date(for: sortKey) }
-            out.append(RecentInstance(
-                id: instanceUUID,
-                instanceName: row.name,
-                code: row.code,
-                systemPath: row.absoluteFileSystemPath.isEmpty ? nil : row.absoluteFileSystemPath,
-                repositoryName: repositoryName,
-                sessions: sessions
-            ))
-        }
-        out.sort { ($0.sessions.first?.date(for: sortKey) ?? .distantPast) > ($1.sessions.first?.date(for: sortKey) ?? .distantPast) }
-        return out
-    }
-
-    private static func describe(_ error: DaemonError) -> String {
-        switch error {
-        // An old daemon answers CATALOG_SEARCH with UNKNOWN_TYPE (or trips the
-        // version gate) — that's "rebuild the daemon", not a search failure.
-        case .server(let code, _) where code == "UNKNOWN_TYPE":
-            return "Search requires an updated daemon."
-        case .daemonTooOld, .clientTooOld:
-            return "Search requires an updated daemon."
-        case .unreachable, .notInstalled:
-            return "GMCC daemon unavailable."
-        case .server(_, let message):
-            return message
-        case .transport(let message):
-            return message
-        default:
-            return String(describing: error)
-        }
-    }
-}
-
-/// One instance's title row (RepName · name · system path + path actions) followed by
-/// its newest sessions.
-private struct InstanceSection: View {
-    let instance: RecentInstance
-    let openSession: (SessionWindowID) -> Void
-
-    // Sessions render 5 per page; the pager only appears when there is more
-    // than one page. Page index resets whenever the session list changes.
-    private static let pageSize = 5
-    @State private var page = 0
-
-    private var pageCount: Int {
-        max(1, (instance.sessions.count + Self.pageSize - 1) / Self.pageSize)
-    }
-
-    private var visibleSessions: ArraySlice<RecentSession> {
-        let clamped = min(page, pageCount - 1)
-        let start = clamped * Self.pageSize
-        let end = min(start + Self.pageSize, instance.sessions.count)
-        return instance.sessions[start..<end]
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "internaldrive")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                identityText
-                Spacer(minLength: 8)
-                InstancePathActions(systemPath: instance.systemPath,
-                                    instanceUUID: instance.id,
-                                    instanceName: instance.instanceName)
-            }
-
-            ForEach(visibleSessions) { session in
-                Button {
-                    openSession(session.windowID)
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.triangle.branch")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(session.name)
-                            .font(.body)
-                        if let branch = session.branch, !branch.isEmpty {
-                            Text(branch)
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Image(systemName: "macwindow.badge.plus")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(.vertical, 4)
-                    .padding(.leading, 18)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-
-            if pageCount > 1 {
-                pagerRow
-            }
-        }
-        .onChange(of: instance.sessions) { page = 0 }
-    }
-
-    private var pagerRow: some View {
-        HStack(spacing: 8) {
-            Button {
-                page = max(0, page - 1)
-            } label: {
-                Image(systemName: "chevron.left")
-            }
-            .buttonStyle(.borderless)
-            .disabled(page == 0)
-
-            Text("\(min(page, pageCount - 1) + 1)/\(pageCount)")
-                .font(.caption2.monospaced())
-                .foregroundStyle(.secondary)
-
-            Button {
-                page = min(pageCount - 1, page + 1)
-            } label: {
-                Image(systemName: "chevron.right")
-            }
-            .buttonStyle(.borderless)
-            .disabled(page >= pageCount - 1)
-
-            Spacer()
-        }
-        .controlSize(.small)
-        .padding(.leading, 18)
-    }
-
-    // RepName · instance name · system path — only the fields that are present.
-    @ViewBuilder
-    private var identityText: some View {
-        HStack(spacing: 6) {
-            if let repo = instance.repositoryName, !repo.isEmpty {
-                Text(repo).font(.subheadline.weight(.medium))
-                Text("·").foregroundStyle(.tertiary)
-            }
-            Text(instance.instanceName)
-                .font(.subheadline.weight(.medium))
-            if let path = instance.systemPath, !path.isEmpty {
-                Text("·").foregroundStyle(.tertiary)
-                Text(path)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-        }
     }
 }
 
@@ -612,7 +430,7 @@ private struct CatalogErrorState: View {
 }
 
 // Thin warning when browsing works (daemon up) but the shell env is unset —
-// Memories, kbite roots, and folder-open actions degrade without it.
+// Memories and folder-open actions degrade without it.
 private struct EnvWarningStrip: View {
     @Environment(GMCCEnvironment.self) private var gmcc
 
@@ -630,11 +448,11 @@ private struct EnvWarningStrip: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
-        .background(.orange.opacity(0.08))
+        .background(.orange.opacity(0.08), in: .rect(cornerRadius: 8))
     }
 }
 
-private struct CommandCopyRow: View {
+struct CommandCopyRow: View {
     let command: String
     @State private var copied = false
 
@@ -659,43 +477,5 @@ private struct CommandCopyRow: View {
         }
         .padding(12)
         .glassEffect(.regular, in: .rect(cornerRadius: 12))
-    }
-}
-
-// MARK: - Bottom brand bar
-
-private struct BrandBar: View {
-    var body: some View {
-        HStack(spacing: 10) {
-            appIcon
-                .frame(width: 22, height: 22)
-            Text("GM Vibes")
-                .font(.headline)
-            Spacer()
-            DaemonStatusIndicator()
-            Text("v\(appVersion)")
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
-
-    @ViewBuilder
-    private var appIcon: some View {
-        if let icon = NSApplication.shared.applicationIconImage {
-            Image(nsImage: icon)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-        } else {
-            Image(systemName: "mountain.2.fill")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
     }
 }

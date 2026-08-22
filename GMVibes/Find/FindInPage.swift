@@ -3,7 +3,7 @@ import Observation
 
 // Per-occurrence find-in-page over a set of ordered plain-text segments.
 //
-// The Yeet reader's find engine counts matching *elements* (anchors) — it cannot
+// The old anchor-based find engine counted matching *elements* — it could not
 // count or step individual substring occurrences inside one blob of text. This is
 // the missing piece: occurrences are enumerated per segment, concatenated in the
 // host-provided segment order into a flat global list, and the active global index
@@ -65,7 +65,7 @@ struct FindMatches {
     }
 }
 
-// MARK: - Count chip ("N of M") — shared, non-private (Yeet keeps its own copy).
+// MARK: - Count chip ("N of M") — shared.
 
 struct FindCountChip: View {
     let current: Int

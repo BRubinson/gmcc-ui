@@ -22,12 +22,27 @@ final class SessionStore {
     private(set) var hasLoaded = false
 
     private let service = GMCCDaemonService.shared
+    private var inFlight: Task<Void, Never>?
 
     init(sessionUuid: String) {
         self.sessionUuid = sessionUuid
     }
 
+    /// Coalesced: the store is shared by every window on this session, and
+    /// each window's refresh loop calls this per invalidation — N windows must
+    /// still cost ONE SESSION_GET + one sequential prefetch.
     func refresh() async {
+        if let running = inFlight {
+            await running.value
+            return
+        }
+        let task = Task { await self.performRefresh() }
+        inFlight = task
+        await task.value
+        inFlight = nil
+    }
+
+    private func performRefresh() async {
         do {
             let response = try await service.getSession(sessionUuid: sessionUuid)
             if session != response.session { session = response.session }
@@ -51,7 +66,7 @@ final class SessionStore {
                 }
             }
         } catch let error as DaemonError {
-            lastError = Self.describe(error)
+            lastError = error.userMessage
             hasLoaded = true
         } catch {
             lastError = String(describing: error)
@@ -68,14 +83,4 @@ final class SessionStore {
         }
     }
 
-    private static func describe(_ error: DaemonError) -> String {
-        switch error {
-        case .notFound: return "Session not in the GMCC database yet — run /import_legacy_yaml_gmcc."
-        case .notInstalled: return "Daemon not installed"
-        case .unreachable(let m): return m
-        case .server(let code, let message): return "\(code): \(message)"
-        case .transport(let m): return m
-        default: return String(describing: error)
-        }
-    }
 }

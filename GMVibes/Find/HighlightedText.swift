@@ -3,7 +3,7 @@ import SwiftUI
 // Renders a plain string with find-in-page highlighting: every occurrence of the
 // literal query gets a yellow background; the active occurrence (if it falls in
 // this segment) is recolored GREEN per spec. Built on the same AttributedString
-// range-walk the Yeet reader uses, but keyed by per-occurrence ordinal rather than
+// range-walk the old reader used, but keyed by per-occurrence ordinal rather than
 // by a structural anchor, so it can distinguish the Nth match within one string.
 enum FindHighlight {
     static func attributed(_ source: String,

@@ -1,5 +1,4 @@
 import SwiftUI
-import SwiftData
 
 @main
 struct GMVibesApp: App {
@@ -9,66 +8,39 @@ struct GMVibesApp: App {
     @State private var services = GMVibesServices()
 
     var body: some Scene {
-        // Primary launcher (singleton).
-        Window("GM Vibes", id: "landing") {
-            LandingView()
+        // THE window type. Every window navigates the whole app via WindowNav;
+        // WindowSeed's per-open UUID makes dedupe structurally impossible, and
+        // its decoder always yields landing so restoration lands there too.
+        WindowGroup("GM Vibes", for: WindowSeed.self) { $seed in
+            GMVibesWindow(seed: seed ?? WindowSeed())
                 .gmccEnv(services)
+        } defaultValue: {
+            WindowSeed()
         }
         .windowResizability(.contentMinSize)
         .commands {
-            YeetFindCommands()
-        }
-
-        // Feature windows. Yeet Viewer + KBites are singletons (openWindow(id:)
-        // focuses the existing one). Projects is a group so multiples can open.
-        Window("Yeet Viewer", id: "yeet-viewer") {
-            YeetViewerScene()
-                .gmccEnv(services)
-        }
-
-        Window("Knowledge Bites", id: "kbites") {
-            KBitesScene()
-                .gmccEnv(services)
-        }
-
-        WindowGroup("Projects", id: "projects") {
-            ProjectsScene()
-                .gmccEnv(services)
-        }
-
-        // One window per session (keyed on SessionWindowID.sessionUUID).
-        WindowGroup(for: SessionWindowID.self) { $windowID in
-            if let windowID {
-                SessionTodoView(windowID: windowID)
-                    .gmccEnv(services)
-                    .modelContainer(PromptHistoryStore.container)
-            } else {
-                Text("No session")
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 480, minHeight: 320)
-            }
-        }
-
-        // Per-file KBite markdown window.
-        WindowGroup("KBite File", id: "kbite-md", for: URL.self) { $url in
-            KBiteMarkdownWindowView(url: url)
-                .gmccEnv(services)
-        }
-
-        // Popped-out Memories explorer (one per prompt's memory folder). MUST inject
-        // .gmccEnv — the explorer reads FileTreeStore for the polled file
-        // tree, so without it the window would crash on a missing environment object.
-        WindowGroup("Prompt Memories", id: "prompt-memories", for: PromptMemoriesWindowID.self) { $windowID in
-            PromptMemoriesWindow(windowID: windowID)
-                .gmccEnv(services)
+            FindCommands()
+            PaletteCommands()
         }
     }
 }
 
-struct YeetFindCommands: Commands {
-    @FocusedValue(\.yeetFind) private var find: (() -> Void)?
-    @FocusedValue(\.yeetFindNext) private var findNext: (() -> Void)?
-    @FocusedValue(\.yeetFindPrev) private var findPrev: (() -> Void)?
+struct PaletteCommands: Commands {
+    @FocusedValue(\.commandPalette) private var openPalette: (() -> Void)?
+
+    var body: some Commands {
+        CommandGroup(after: .toolbar) {
+            Button("Command Palette…") { openPalette?() }
+                .keyboardShortcut("k", modifiers: .command)
+                .disabled(openPalette == nil)
+        }
+    }
+}
+
+struct FindCommands: Commands {
+    @FocusedValue(\.findInPage) private var find: (() -> Void)?
+    @FocusedValue(\.findNext) private var findNext: (() -> Void)?
+    @FocusedValue(\.findPrevious) private var findPrev: (() -> Void)?
 
     var body: some Commands {
         CommandGroup(after: .textEditing) {

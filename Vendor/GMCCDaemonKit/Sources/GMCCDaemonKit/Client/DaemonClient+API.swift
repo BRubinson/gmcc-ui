@@ -149,3 +149,99 @@ extension DaemonClient {
         try request(type: .eventList, payload: req, responseType: EventListResponse.self)
     }
 }
+
+// MARK: - Clarification (v7)
+
+extension DaemonClient {
+    public func clarifyOpen(_ req: ClarifyOpenRequest) throws -> ClarifySummaryResponse {
+        try request(type: .clarifyOpen, payload: req, responseType: ClarifySummaryResponse.self)
+    }
+
+    public func clarifyAsk(_ req: ClarifyAskRequest) throws -> ClarificationRowResponse {
+        try request(type: .clarifyAsk, payload: req, responseType: ClarificationRowResponse.self)
+    }
+
+    public func clarifySeal(_ req: ClarifySealRequest) throws -> ClarifySummaryResponse {
+        try request(type: .clarifySeal, payload: req, responseType: ClarifySummaryResponse.self)
+    }
+
+    public func clarifyAnswer(_ req: ClarifyAnswerRequest) throws -> ClarificationRowResponse {
+        try request(type: .clarifyAnswer, payload: req, responseType: ClarificationRowResponse.self)
+    }
+
+    public func clarifyReopen(_ req: ClarifyReopenRequest) throws -> ClarifySummaryResponse {
+        try request(type: .clarifyReopen, payload: req, responseType: ClarifySummaryResponse.self)
+    }
+
+    public func clarifyFinalize(_ req: ClarifyFinalizeRequest) throws -> ClarifyFinalizeResponse {
+        try request(type: .clarifyFinalize, payload: req, responseType: ClarifyFinalizeResponse.self)
+    }
+
+    public func clarifyGet(_ req: ClarifyGetRequest) throws -> ClarifyGetResponse {
+        try request(type: .clarifyGet, payload: req, responseType: ClarifyGetResponse.self)
+    }
+}
+
+// MARK: - Architecture (v7)
+
+extension DaemonClient {
+    public func archOpen(_ req: ArchOpenRequest) throws -> ArchSummaryResponse {
+        try request(type: .archOpen, payload: req, responseType: ArchSummaryResponse.self)
+    }
+
+    public func archSummarize(_ req: ArchSummarizeRequest) throws -> ArchSummaryResponse {
+        try request(type: .archSummarize, payload: req, responseType: ArchSummaryResponse.self)
+    }
+
+    public func archPersistAdd(_ req: ArchPersistAddRequest) throws -> ArchPersistAddResponse {
+        try request(type: .archPersistAdd, payload: req, responseType: ArchPersistAddResponse.self)
+    }
+
+    public func archFieldAdd(_ req: ArchFieldAddRequest) throws -> ArchFieldAddResponse {
+        try request(type: .archFieldAdd, payload: req, responseType: ArchFieldAddResponse.self)
+    }
+
+    public func archGeneralAdd(_ req: ArchGeneralAddRequest) throws -> ArchGeneralAddResponse {
+        try request(type: .archGeneralAdd, payload: req, responseType: ArchGeneralAddResponse.self)
+    }
+
+    public func archPropose(_ req: ArchProposeRequest) throws -> ArchSummaryResponse {
+        try request(type: .archPropose, payload: req, responseType: ArchSummaryResponse.self)
+    }
+
+    public func archApprove(_ req: ArchApproveRequest) throws -> ArchSummaryResponse {
+        try request(type: .archApprove, payload: req, responseType: ArchSummaryResponse.self)
+    }
+
+    public func archRevise(_ req: ArchReviseRequest) throws -> ArchSummaryResponse {
+        try request(type: .archRevise, payload: req, responseType: ArchSummaryResponse.self)
+    }
+
+    public func archGet(_ req: ArchGetRequest) throws -> ArchGetResponse {
+        try request(type: .archGet, payload: req, responseType: ArchGetResponse.self)
+    }
+}
+
+// MARK: - Git state + config (v7)
+
+extension DaemonClient {
+    public func sessionResolve(_ req: SessionResolveRequest) throws -> SessionResolveResponse {
+        try request(type: .sessionResolve, payload: req, responseType: SessionResolveResponse.self)
+    }
+
+    public func instanceCurrentSession(
+        _ req: InstanceCurrentSessionRequest
+    ) throws -> InstanceCurrentSessionResponse {
+        try request(
+            type: .instanceCurrentSession, payload: req,
+            responseType: InstanceCurrentSessionResponse.self)
+    }
+
+    public func pathsGet() throws -> PathsGetResponse {
+        try request(type: .pathsGet, payload: PathsGetRequest(), responseType: PathsGetResponse.self)
+    }
+
+    public func configSet(_ req: ConfigSetRequest) throws -> ConfigSetResponse {
+        try request(type: .configSet, payload: req, responseType: ConfigSetResponse.self)
+    }
+}

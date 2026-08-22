@@ -155,7 +155,7 @@ private struct OpenMemoryFileButton: View {
     @Environment(\.openWindow) private var openWindow
     var body: some View {
         Button {
-            openWindow(id: "kbite-md", value: url)
+            openWindow(value: WindowSeed(.kbiteFile(url)))
         } label: {
             Label("Open in Window", systemImage: "macwindow.badge.plus")
         }
@@ -208,9 +208,9 @@ private struct MemoriesReader: View {
             loaded = true
         }
         // cmd+F toggles the find bar; reuses the shared Find menu command.
-        .focusedSceneValue(\.yeetFind) { find.isPresented = true }
-        .focusedSceneValue(\.yeetFindNext, matches.total == 0 ? nil : { step(+1) })
-        .focusedSceneValue(\.yeetFindPrev, matches.total == 0 ? nil : { step(-1) })
+        .focusedSceneValue(\.findInPage) { find.isPresented = true }
+        .focusedSceneValue(\.findNext, matches.total == 0 ? nil : { step(+1) })
+        .focusedSceneValue(\.findPrevious, matches.total == 0 ? nil : { step(-1) })
     }
 
     private var header: some View {
@@ -223,7 +223,7 @@ private struct MemoriesReader: View {
                     .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
             }
             Spacer()
-            Button { openWindow(id: "kbite-md", value: url) } label: {
+            Button { openWindow(value: WindowSeed(.kbiteFile(url))) } label: {
                 Label("Open in Window", systemImage: "macwindow.badge.plus")
             }
             .buttonStyle(.bordered)
@@ -236,7 +236,7 @@ private struct MemoriesReader: View {
         if !loaded {
             ProgressView().controlSize(.small)
         } else if find.searchQuery.isActive {
-            // While searching, show highlighted plain text (matches the Yeet reader).
+            // While searching, show highlighted plain text.
             HighlightedText(source: source, query: find.searchQuery, activeLocalOccurrence: activeLocal)
         } else if isMarkdown {
             MarkdownBlocksView(blocks)

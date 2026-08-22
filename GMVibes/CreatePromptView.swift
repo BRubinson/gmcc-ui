@@ -4,9 +4,8 @@ import GMCCDaemonKit
 // Authoring sheet: create a new prompt in an existing session via PROMPT_CREATE
 // (the daemon allocates the per-session seq atomically — no client-side id
 // derivation). Captures name + backstory/goal/detail + a kbite multi-select
-// (pre-seeded from the session-scope registry; options scanned from
-// $GMCC_KBITE_DIGESTED); selected kbites are registered at prompt scope after
-// creation.
+// (pre-seeded from the session-scope registry; options from KBITE_LIST
+// all:true); selected kbites are registered at prompt scope after creation.
 struct CreatePromptView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(GMCCEnvironment.self) private var gmcc
@@ -56,7 +55,7 @@ struct CreatePromptView: View {
                 }
                 Section("KBites") {
                     if availableKbites.isEmpty {
-                        Text("No kbites found in $GMCC_KBITE_DIGESTED.")
+                        Text("No kbites in the GMCC database yet.")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
                         ForEach(availableKbites, id: \.self) { kbite in
@@ -100,18 +99,9 @@ struct CreatePromptView: View {
         // Session-scope registry seeds the preselection (kbite inheritance).
         let sessionCodes = (try? await GMCCDaemonService.shared.listKbites(
             scope: .session, ownerUuid: store.sessionUuid))?.map(\.code) ?? []
-        var names: [String] = []
-        if let digested = gmcc[.kbiteDigested] {
-            let dir = URL(fileURLWithPath: digested, isDirectory: true)
-            let contents = (try? FileManager.default.contentsOfDirectory(
-                at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
-            )) ?? []
-            names = contents.compactMap { url in
-                let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                return isDir ? url.lastPathComponent : nil
-            }.sorted()
-        }
-        // Always surface inherited kbites even if the digested dir scan misses them.
+        let names = (try? await GMCCDaemonService.shared.listKbites(
+            scope: .session, ownerUuid: store.sessionUuid, all: true))?.map(\.code) ?? []
+        // Always surface inherited kbites even if the registry list misses them.
         let preselected = Set(sessionCodes)
         let merged = Set(names).union(preselected)
         availableKbites = merged.sorted()
@@ -156,7 +146,7 @@ struct CreatePromptView: View {
             isSaving = false
             dismiss()
         } catch let error as DaemonError {
-            errorText = Self.describe(error)
+            errorText = error.userMessage
             isSaving = false
         } catch {
             errorText = String(describing: error)
@@ -164,14 +154,4 @@ struct CreatePromptView: View {
         }
     }
 
-    private static func describe(_ error: DaemonError) -> String {
-        switch error {
-        case .notFound: return "Session not in the GMCC database — run /import_legacy_yaml_gmcc first."
-        case .notInstalled: return "Daemon not installed (run build_daemon.sh)."
-        case .unreachable(let m): return m
-        case .server(let code, let message): return "\(code): \(message)"
-        case .transport(let m): return m
-        default: return String(describing: error)
-        }
-    }
 }
