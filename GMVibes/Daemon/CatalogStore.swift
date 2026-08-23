@@ -46,8 +46,18 @@ final class CatalogStore {
             let newProjects = projects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             let newInstances = Dictionary(grouping: instances, by: \.projectUuid)
                 .mapValues { $0.sorted { $0.updatedAt > $1.updatedAt } }
+            // SESSION_LIST is ORDER BY code — recency sorting is client-side.
+            // lastActivityAt is fixed-width ISO-8601 seconds-Z, so lexicographic
+            // IS chronological (the daemon's stated contract); no parsing. The
+            // code tiebreak matters: Swift's sort is unstable, and an unstable
+            // order under equal timestamps would defeat the change-gated
+            // publication below and thrash selection state.
             let newSessions = Dictionary(grouping: sessions, by: \.instanceUuid)
-                .mapValues { $0.sorted { $0.updatedAt > $1.updatedAt } }
+                .mapValues { $0.sorted {
+                    $0.lastActivityAt == $1.lastActivityAt
+                        ? $0.code < $1.code
+                        : $0.lastActivityAt > $1.lastActivityAt
+                } }
             let newSessionsByUuid = Dictionary(sessions.map { ($0.uuid, $0) }, uniquingKeysWith: { first, _ in first })
             let newInstancesByUuid = Dictionary(instances.map { ($0.uuid, $0) }, uniquingKeysWith: { first, _ in first })
 

@@ -8,19 +8,37 @@ import SwiftUI
 struct MemoriesExplorer: View {
     let rootURL: URL
     @Bindable var model: MemoriesExplorerModel
+    /// Set (with `isDaemonWatched`) to refresh on PROMPT_MEMORY_CHANGED
+    /// instead of polling. nil/false ⇒ the permanent 1s poll — the 105
+    /// pre-m0002 prompts have no storage path and never receive the event,
+    /// and an artifact-common-ancestor root isn't the watched directory.
+    var promptUuid: String? = nil
+    var isDaemonWatched: Bool = false
 
     @Environment(FileTreeStore.self) private var fs
+    @Environment(DaemonConnectionModel.self) private var daemon
 
     private var tree: FileTreeNode? { fs.fileTrees[rootURL] }
 
+    private struct RefreshKey: Hashable {
+        let root: URL
+        let generation: Int
+        /// In the key so a re-resolution that flips the strategy without
+        /// changing the root still restarts the task.
+        let daemonWatched: Bool
+    }
+
     var body: some View {
+        // Minimums must stay UNDER the narrowest host (the trailing inspector
+        // column) — an unsatisfiable AppKit constraint set here thrashes
+        // layout on every pass and reads as a crash when the view loads.
         HSplitView {
             sidebar
-                .frame(minWidth: 220, idealWidth: 280, maxWidth: 420)
+                .frame(minWidth: 160, idealWidth: 240, maxWidth: 420)
 
             if let file = model.selectedFile {
                 MemoriesReader(url: file)
-                    .frame(minWidth: 360)
+                    .frame(minWidth: 240)
                     .id(file)
             } else {
                 ContentUnavailableView(
@@ -28,14 +46,43 @@ struct MemoriesExplorer: View {
                     systemImage: "doc.text",
                     description: Text("Pick a file in the memory folder to preview it.")
                 )
-                .frame(minWidth: 360)
+                .frame(minWidth: 240)
             }
         }
-        .task(id: rootURL) {
-            while !Task.isCancelled {
+        // Keyed on the generation too: PROMPT_MEMORY_CHANGED is ephemeral
+        // (id 0, no replay), so changes during a disconnect are lost — the
+        // task restart's immediate refresh below is the resync.
+        .task(id: RefreshKey(root: rootURL, generation: daemon.generation,
+                             daemonWatched: isDaemonWatched)) {
+            if isDaemonWatched, let promptUuid {
+                // Stream hoisted before the first await (house idiom).
+                let events = daemon.hub.stream(for: .memories(promptUuid.lowercased()))
                 await fs.refreshFileTree(at: rootURL)
                 seedExpansionIfNeeded()
-                try? await Task.sleep(for: .seconds(1))
+                for await _ in events {
+                    await fs.refreshFileTree(at: rootURL)
+                    seedExpansionIfNeeded()
+                }
+            } else {
+                while !Task.isCancelled {
+                    await fs.refreshFileTree(at: rootURL)
+                    seedExpansionIfNeeded()
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+        }
+        // Backstop for the event-driven branch: "the root equals the watched
+        // directory" is NOT "the daemon is delivering" — its FSEventStream is
+        // rooted once at boot (CONFIG_SET never re-roots it), stream-create
+        // failures are stderr-only, and the popout window ID snapshots the
+        // flag. A slow safety poll keeps ~97% of the 1s-poll saving while
+        // removing the silent-freeze class entirely.
+        .task(id: rootURL) {
+            guard isDaemonWatched else { return }   // the 1s poll already runs
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                await fs.refreshFileTree(at: rootURL)
+                seedExpansionIfNeeded()
             }
         }
     }
@@ -89,7 +136,12 @@ struct PromptMemoriesWindow: View {
     var body: some View {
         Group {
             if let windowID {
-                MemoriesExplorer(rootURL: windowID.memoryRootURL, model: model)
+                MemoriesExplorer(
+                    rootURL: windowID.memoryRootURL,
+                    model: model,
+                    promptUuid: windowID.promptUuid,
+                    isDaemonWatched: windowID.isDaemonWatched ?? false
+                )
                     .navigationTitle("Memories — \(windowID.promptName)")
                     .onAppear {
                         guard !seeded else { return }

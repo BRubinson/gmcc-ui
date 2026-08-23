@@ -68,8 +68,14 @@ extension Store {
     }
 
     /// nil sessionUuid = every prompt in the db, grouped by session (seq is
-    /// only unique per session, hence the two-column ORDER BY).
-    func fetchPromptStubs(_ db: Database, sessionUuid: String?) throws -> [PromptStub] {
+    /// only unique per session, hence the two-column ORDER BY). withReports
+    /// attaches the per-prompt clarification/architecture summary stubs via
+    /// two grouped aggregate queries folded into dictionaries — one grouped
+    /// aggregation, never per-row (a per-prompt fetch here would be the N+1
+    /// the enrichment exists to delete).
+    func fetchPromptStubs(
+        _ db: Database, sessionUuid: String?, withReports: Bool = false
+    ) throws -> [PromptStub] {
         let sql: String
         let arguments: StatementArguments
         if let sessionUuid {
@@ -87,9 +93,55 @@ extension Store {
                 """
             arguments = []
         }
+        var clar: [String: ClarificationReportStub] = [:]
+        var arch: [String: ArchitectureReportStub] = [:]
+        if withReports {
+            let scope = sessionUuid == nil
+                ? ""
+                : "WHERE cs.prompt_uuid IN (SELECT uuid FROM prompt WHERE session_uuid = ?)"
+            let scopeArgs: StatementArguments = sessionUuid.map { [$0] } ?? []
+            for row in try Row.fetchAll(db, sql: """
+                SELECT cs.prompt_uuid, cs.uuid, cs.version, cs.status,
+                       cs.refined_goal, cs.backstory_note,
+                       COUNT(c.uuid) AS q_count,
+                       COALESCE(SUM(c.status = 'open'), 0) AS open_count
+                FROM clarification_summary cs
+                LEFT JOIN clarification c ON c.clarification_summary_uuid = cs.uuid
+                \(scope)
+                GROUP BY cs.uuid
+                """, arguments: scopeArgs) {
+                clar[row["prompt_uuid"]] = ClarificationReportStub(
+                    summaryUuid: row["uuid"],
+                    version: row["version"],
+                    status: row["status"],
+                    refinedGoal: row["refined_goal"],
+                    backstoryNote: row["backstory_note"],
+                    questionCount: row["q_count"],
+                    openQuestionCount: row["open_count"]
+                )
+            }
+            for row in try Row.fetchAll(db, sql: """
+                SELECT cs.prompt_uuid, cs.uuid, cs.version, cs.status,
+                       (SELECT COUNT(*) FROM architecture_persistence_change pc
+                        WHERE pc.architecture_summary_uuid = cs.uuid) AS p_count,
+                       (SELECT COUNT(*) FROM architecture_general_change gc
+                        WHERE gc.architecture_summary_uuid = cs.uuid) AS g_count
+                FROM architecture_summary cs
+                \(scope)
+                """, arguments: scopeArgs) {
+                arch[row["prompt_uuid"]] = ArchitectureReportStub(
+                    summaryUuid: row["uuid"],
+                    version: row["version"],
+                    status: row["status"],
+                    persistenceChangeCount: row["p_count"],
+                    generalChangeCount: row["g_count"]
+                )
+            }
+        }
         return try Row.fetchAll(db, sql: sql, arguments: arguments).map { row in
-            PromptStub(
-                uuid: row["uuid"],
+            let uuid: String = row["uuid"]
+            return PromptStub(
+                uuid: uuid,
                 sessionUuid: row["session_uuid"],
                 seq: row["seq"],
                 code: row["code"],
@@ -97,6 +149,10 @@ extension Store {
                 status: row["status"],
                 version: row["version"],
                 ckfsRelativeStoragePath: row["ckfs_relative_storage_path"],
+                isLegacy: try isLegacyPrompt(db, createdAt: row["created_at"]),
+                reports: withReports
+                    ? PromptReportsStub(clarification: clar[uuid], architecture: arch[uuid])
+                    : nil,
                 createdAt: row["created_at"],
                 updatedAt: row["updated_at"]
             )

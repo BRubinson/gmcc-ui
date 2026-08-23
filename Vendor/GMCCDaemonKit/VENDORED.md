@@ -5,7 +5,7 @@ Do not edit these sources here — change them upstream and re-vendor.
 
 - Source repo: https://github.com/BRubinson/gmcc-marketplace.git
 - Branch: main
-- Commit: a4a91e9
-- Vendored: 2026-08-22T20:09:12Z
+- Commit: 5698bab
+- Vendored: 2026-08-23T10:55:55Z
 
 Refresh with: `scripts/vendor-daemonkit.sh [branch]`

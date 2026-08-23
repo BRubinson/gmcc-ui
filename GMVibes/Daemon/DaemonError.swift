@@ -16,7 +16,10 @@ nonisolated enum DaemonError: Error, Equatable {
     case daemonTooOld(daemonVersion: Int?, message: String)
     case notFound
     case versionConflict
-    case invalidTransition
+    /// Illegal status edge OR an unmet daemon-side gate (they share one wire
+    /// code). The daemon's reason string is preserved — it names which gate
+    /// blocked ("clarification summary must be complete", …).
+    case invalidTransition(reason: String?)
     case contentLocked
     /// Any other server-reported code (BAD_REQUEST, DB_ERROR, …) — surfaced
     /// verbatim so e.g. a schema re-baseline DB_ERROR stays diagnosable.
@@ -34,7 +37,7 @@ nonisolated enum DaemonError: Error, Equatable {
         case .daemonTooOld(_, let m): return m
         case .notFound: return "Not in the GMCC database yet — run /import_legacy_yaml_gmcc."
         case .versionConflict: return "Edited elsewhere — reload to continue."
-        case .invalidTransition: return "That status change isn't allowed."
+        case .invalidTransition(let reason): return reason ?? "That status change isn't allowed."
         case .contentLocked: return "Content is locked."
         case .server(let code, let message): return "\(code): \(message)"
         case .transport(let m): return m
@@ -69,7 +72,7 @@ nonisolated enum DaemonError: Error, Equatable {
             switch payload.code {
             case .notFound: self = .notFound
             case .versionConflict: self = .versionConflict
-            case .invalidTransition: self = .invalidTransition
+            case .invalidTransition: self = .invalidTransition(reason: payload.message.isEmpty ? nil : payload.message)
             case .contentLocked: self = .contentLocked
             default: self = .server(code: payload.codeRaw, message: payload.message)
             }

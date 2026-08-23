@@ -160,6 +160,10 @@ public struct PromptRow: Codable, Hashable, Sendable {
     public let command: String
     public let status: String
     public let ckfsRelativeStoragePath: String
+    /// True when the prompt predates the m0002 lifecycle epoch — it
+    /// legitimately has no clarification/architecture rows and never will.
+    /// Computed at materialization against the epoch cache, never stored.
+    public let isLegacy: Bool
     public let createdAt: String
     public let updatedAt: String
 
@@ -178,6 +182,7 @@ public struct PromptRow: Codable, Hashable, Sendable {
         command: String,
         status: String,
         ckfsRelativeStoragePath: String,
+        isLegacy: Bool,
         createdAt: String,
         updatedAt: String
     ) {
@@ -193,6 +198,7 @@ public struct PromptRow: Codable, Hashable, Sendable {
         self.command = command
         self.status = status
         self.ckfsRelativeStoragePath = ckfsRelativeStoragePath
+        self.isLegacy = isLegacy
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -211,6 +217,13 @@ public struct PromptStub: Codable, Hashable, Sendable {
     public let status: String
     public let version: Int64
     public let ckfsRelativeStoragePath: String
+    /// True when the prompt predates the m0002 lifecycle epoch (see
+    /// PromptRow.isLegacy).
+    public let isLegacy: Bool
+    /// Present only when PROMPT_LIST was called with `with_reports` — nested
+    /// so "not requested" (nil) and "requested, none exists" (present with
+    /// nil members) stay distinguishable.
+    public let reports: PromptReportsStub?
     public let createdAt: String
     public let updatedAt: String
 
@@ -223,6 +236,8 @@ public struct PromptStub: Codable, Hashable, Sendable {
         status: String,
         version: Int64,
         ckfsRelativeStoragePath: String,
+        isLegacy: Bool,
+        reports: PromptReportsStub? = nil,
         createdAt: String,
         updatedAt: String
     ) {
@@ -234,8 +249,126 @@ public struct PromptStub: Codable, Hashable, Sendable {
         self.status = status
         self.version = version
         self.ckfsRelativeStoragePath = ckfsRelativeStoragePath
+        self.isLegacy = isLegacy
+        self.reports = reports
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+}
+
+/// The PROMPT_LIST `with_reports` enrichment block: one summary stub per
+/// report machine. A nil member means that summary was never opened —
+/// combined with `isLegacy` that is exactly the SUMMARY_ABSENT
+/// discrimination, surfaced in a listing.
+public struct PromptReportsStub: Codable, Hashable, Sendable {
+    public let clarification: ClarificationReportStub?
+    public let architecture: ArchitectureReportStub?
+
+    public init(clarification: ClarificationReportStub?, architecture: ArchitectureReportStub?) {
+        self.clarification = clarification
+        self.architecture = architecture
+    }
+}
+
+/// Clarification summary stub for the enrichment block. Carries the summary
+/// version so the caller can mutate immediately without a confirming fetch.
+public struct ClarificationReportStub: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let version: Int64
+    public let status: String
+    public let refinedGoal: String
+    public let backstoryNote: String
+    public let questionCount: Int
+    /// Resume signal: >0 means the clarification stalled mid-answering.
+    public let openQuestionCount: Int
+
+    public init(
+        summaryUuid: String,
+        version: Int64,
+        status: String,
+        refinedGoal: String,
+        backstoryNote: String,
+        questionCount: Int,
+        openQuestionCount: Int
+    ) {
+        self.summaryUuid = summaryUuid
+        self.version = version
+        self.status = status
+        self.refinedGoal = refinedGoal
+        self.backstoryNote = backstoryNote
+        self.questionCount = questionCount
+        self.openQuestionCount = openQuestionCount
+    }
+}
+
+/// Architecture summary stub for the enrichment block.
+public struct ArchitectureReportStub: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let version: Int64
+    public let status: String
+    public let persistenceChangeCount: Int
+    public let generalChangeCount: Int
+
+    public init(
+        summaryUuid: String,
+        version: Int64,
+        status: String,
+        persistenceChangeCount: Int,
+        generalChangeCount: Int
+    ) {
+        self.summaryUuid = summaryUuid
+        self.version = version
+        self.status = status
+        self.persistenceChangeCount = persistenceChangeCount
+        self.generalChangeCount = generalChangeCount
+    }
+}
+
+/// One ranked SEARCH result. Stubs-not-content discipline: `excerpt` is a
+/// bounded FTS5 snippet, never a full body; full prompt lineage rides along
+/// so the caller never needs a follow-up fetch to know what it found.
+public struct SearchHit: Codable, Hashable, Sendable {
+    /// Raw kind string (same forward-compat rule as event kinds/error codes).
+    public let kind: String
+    /// The matched row's own uuid.
+    public let subjectUuid: String
+    public let promptUuid: String
+    public let promptSeq: Int64
+    public let promptName: String
+    public let promptStatus: String
+    public let sessionUuid: String
+    public let sessionCode: String
+    /// Short label per kind: prompt name / question / file path / "architecture summary".
+    public let title: String
+    /// Bounded snippet from the best-matching column.
+    public let excerpt: String
+    /// bm25-derived; negative, smaller = better; comparable WITHIN a kind only.
+    public let score: Double
+
+    public init(
+        kind: String,
+        subjectUuid: String,
+        promptUuid: String,
+        promptSeq: Int64,
+        promptName: String,
+        promptStatus: String,
+        sessionUuid: String,
+        sessionCode: String,
+        title: String,
+        excerpt: String,
+        score: Double
+    ) {
+        self.kind = kind
+        self.subjectUuid = subjectUuid
+        self.promptUuid = promptUuid
+        self.promptSeq = promptSeq
+        self.promptName = promptName
+        self.promptStatus = promptStatus
+        self.sessionUuid = sessionUuid
+        self.sessionCode = sessionCode
+        self.title = title
+        self.excerpt = excerpt
+        self.score = score
     }
 }
 

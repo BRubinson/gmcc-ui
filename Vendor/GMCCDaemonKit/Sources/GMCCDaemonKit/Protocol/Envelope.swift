@@ -7,7 +7,7 @@ import Foundation
 /// rejected — the daemon stays up (an old pinned-Kit GMVibes must never be
 /// able to kill-loop a fresh daemon).
 public enum GMCCWireProtocol {
-    public static let version = 7
+    public static let version = 8
 }
 
 /// Discriminator for every NDJSON message on the socket. One case per spec
@@ -54,6 +54,8 @@ public enum MessageType: String, Codable, Hashable, CaseIterable, Sendable {
     case kbiteKeywordTag = "KBITE_KEYWORD_TAG"
     // Catalog search (instances + sessions, the GMVibes search bar)
     case catalogSearch = "CATALOG_SEARCH"
+    // Full-text search over prompt/clarification/architecture text (v8)
+    case search = "SEARCH"
     // Clarification machine (v7)
     case clarifyOpen = "CLARIFY_OPEN"
     case clarifyAsk = "CLARIFY_ASK"
@@ -184,6 +186,11 @@ public enum ErrorCode: String, Codable, Hashable, CaseIterable, Sendable {
     case versionConflict = "VERSION_CONFLICT"
     case invalidTransition = "INVALID_TRANSITION"
     case contentLocked = "CONTENT_LOCKED"
+    /// The prompt exists but has no clarification/architecture summary. The
+    /// payload's `promptIsLegacy` says which absence: true ⇒ pre-m0002 prompt,
+    /// read the ckfs artifact; false ⇒ not opened yet. Plain NOT_FOUND now
+    /// means only that the uuid itself is unknown.
+    case summaryAbsent = "SUMMARY_ABSENT"
 }
 
 /// Error envelope. `code` travels as a RAW STRING so a daemon that grows new
@@ -195,6 +202,9 @@ public struct ErrorPayload: Codable, Hashable, Sendable {
     /// Set on PROTOCOL_MISMATCH so clients can be directional too: retry with
     /// autostart only when a freshly built binary would win.
     public let daemonProtocolVersion: Int?
+    /// Set on SUMMARY_ABSENT: machine-readable answer to "is this prompt
+    /// legacy?" so callers never parse the message text.
+    public let promptIsLegacy: Bool?
 
     public var code: ErrorCode? { ErrorCode(rawValue: codeRaw) }
 
@@ -206,12 +216,14 @@ public struct ErrorPayload: Codable, Hashable, Sendable {
         case codeRaw = "code"
         case message
         case daemonProtocolVersion
+        case promptIsLegacy
     }
 
-    public init(code: ErrorCode, message: String, daemonProtocolVersion: Int? = nil) {
+    public init(code: ErrorCode, message: String, daemonProtocolVersion: Int? = nil, promptIsLegacy: Bool? = nil) {
         self.codeRaw = code.rawValue
         self.message = message
         self.daemonProtocolVersion = daemonProtocolVersion
+        self.promptIsLegacy = promptIsLegacy
     }
 }
 

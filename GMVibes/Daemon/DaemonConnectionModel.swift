@@ -90,6 +90,33 @@ final class DaemonConnectionModel {
         sessionPrompts.first { $0.value.prompts.contains(uuid) }?.key
     }
 
+    // MARK: - Summary routing registry (v7)
+
+    /// CLARIFICATION_CHANGE / ARCHITECTURE_CHANGE subjects are SUMMARY uuids;
+    /// only open/summarize/finalize payloads repeat the prompt uuid. Phase
+    /// stores register the summary→prompt edge when their fetch reveals it —
+    /// the mapping lives where it is known. Same owner-token discipline as
+    /// `sessionPrompts`. (Daemon-goal write-back: prompt_uuid on EVERY phase
+    /// payload would delete this registry.)
+    private var summaryPrompts: [String: (owner: ObjectIdentifier, prompt: String)] = [:]
+
+    func registerSummaries(_ summaryUuids: Set<String>, forPrompt promptUuid: String, owner: ObjectIdentifier) {
+        for uuid in summaryUuids {
+            let current = summaryPrompts[uuid]
+            if current?.owner != owner || current?.prompt != promptUuid {
+                summaryPrompts[uuid] = (owner, promptUuid)
+            }
+        }
+    }
+
+    func unregisterSummaries(ifOwnedBy owner: ObjectIdentifier) {
+        summaryPrompts = summaryPrompts.filter { $0.value.owner != owner }
+    }
+
+    private func owningPrompt(ofSummary uuid: String) -> String? {
+        summaryPrompts[uuid]?.prompt
+    }
+
     // MARK: - Supervising loop
 
     /// One loop turn: gate on installed, probe, and while up consume events
@@ -260,6 +287,21 @@ final class DaemonConnectionModel {
         }
     }
 
+    /// The uuid carriers in hand-built event payloads. These payloads are
+    /// JSONSerialization'd snake_case literals (`Store.jsonPayload`), OUTSIDE
+    /// the wire's type system — decoding through `WireCodec.decoder` is what
+    /// maps `sessionUuid` to `"session_uuid"`. A bare `JSONDecoder()` decodes
+    /// to nil silently and routing just quietly stops happening.
+    private struct EventPayloadUuids: Decodable {
+        let sessionUuid: String?
+        let promptUuid: String?
+    }
+
+    private func payloadUuids(_ event: EventNotification) -> EventPayloadUuids? {
+        guard let payload = event.payload, let data = payload.data(using: .utf8) else { return nil }
+        return try? WireCodec.decoder.decode(EventPayloadUuids.self, from: data)
+    }
+
     private func route(_ event: EventNotification) {
         guard let kind = DaemonEventKind(rawValue: event.kind) else {
             return // forward compat: unknown kinds bump nothing
@@ -269,15 +311,21 @@ final class DaemonConnectionModel {
             hub.invalidate(.topology)
         case .updateSession:
             hub.invalidate(.topology)
-            if let uuid = event.subjectUuid { hub.invalidate(.session(uuid)) }
+            // Subjects are lowercased on every arm — subscribers key on
+            // lowercase wire strings, and a case miss here fails silently.
+            if let uuid = event.subjectUuid?.lowercased() { hub.invalidate(.session(uuid)) }
         case .createPrompt:
-            // No session uuid on the wire — fan out.
-            hub.invalidateAllSessions()
+            // v7 payloads carry session_uuid; replayed pre-v7 rows don't — degrade.
+            if let uuid = payloadUuids(event)?.sessionUuid?.lowercased() {
+                hub.invalidate(.session(uuid))
+            } else {
+                hub.invalidateAllSessions()
+            }
         case .updatePrompt, .promptStatusChange, .addArtifact:
             // Subject IS the prompt uuid: route to the owning open session when
             // known (avoids a SESSION_GET storm across windows on every save);
             // fan out only for prompts no open window has registered.
-            if let uuid = event.subjectUuid {
+            if let uuid = event.subjectUuid?.lowercased() {
                 hub.invalidate(.prompt(uuid))
                 if let session = owningSession(ofPrompt: uuid) {
                     hub.invalidate(.session(session))
@@ -289,24 +337,37 @@ final class DaemonConnectionModel {
             }
         case .fileChange:
             hub.invalidate(.changes)
-            hub.invalidateAllSessions()
+            if let uuid = payloadUuids(event)?.sessionUuid?.lowercased() {
+                hub.invalidate(.session(uuid))
+            } else {
+                hub.invalidateAllSessions()
+            }
         case .addKbite, .removeKbite:
             // At prompt scope the subject is the owner (prompt) uuid — refresh
             // the open editor's pills for terminal-side registry edits.
-            if let uuid = event.subjectUuid { hub.invalidate(.prompt(uuid)) }
+            if let uuid = event.subjectUuid?.lowercased() { hub.invalidate(.prompt(uuid)) }
         case .kbiteDigest, .kbiteKeywordTag:
             // No subscriber surface: the KBites browser reads the filesystem
             // and its search hits the daemon on demand.
             break
-        case .clarificationChange, .architectureChange, .promptMemoryChange:
-            // No subscriber surface yet: the subjects are clarification /
-            // architecture summary uuids and memory/ directories, none of
-            // which any open window renders from the daemon.
-            break
+        case .promptMemoryChange:
+            // Ephemeral (id 0, never a replay cursor). The daemon resolves the
+            // storage path server-side and the subject IS the prompt uuid — no
+            // payload decode needed.
+            if let uuid = event.subjectUuid { hub.invalidate(.memories(uuid.lowercased())) }
+        case .clarificationChange, .architectureChange:
+            // Subject is the SUMMARY uuid; the registry (populated by phase
+            // stores from their own fetches) maps it back, with the payload's
+            // prompt_uuid (open/summarize/finalize only) as fallback. NO
+            // fan-out on miss: nothing renders an unopened summary, and
+            // opening one fetches fresh.
+            if let prompt = event.subjectUuid.flatMap({ owningPrompt(ofSummary: $0.lowercased()) })
+                ?? payloadUuids(event)?.promptUuid?.lowercased() {
+                hub.invalidate(.prompt(prompt))
+            }
         case .configSet:
-            // Config (ckfs roots) is read from the environment at boot, not
-            // live from the daemon.
-            break
+            // A root moved daemon-side — the env's PATHS_GET snapshot is stale.
+            hub.invalidate(.paths)
         case .backup, .daemonStart:
             Task { await refreshStatus() }
         case .daemonStop:

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import GMCCDaemonKit
 
 enum GMCCEnvKey: String, CaseIterable, Hashable {
     case ckfsRoot       = "GMCC_CKFS_ROOT"
@@ -9,15 +10,25 @@ enum GMCCEnvKey: String, CaseIterable, Hashable {
     case kbiteOpen      = "GMCC_KBITE_OPEN"
 }
 
-/// Locator for the few filesystem roots the daemon can't answer yet (memory
-/// files, folder-open actions, KBites browse tabs). Resolution order per key:
-/// process environment → conventional-location probe → a single-key ~/.zshrc
-/// scan. The old 140-line multi-variable shell parser/expander is gone — a
-/// PATHS-style daemon message (written goal) retires this file entirely.
+/// Locator for the filesystem roots (memory files, folder-open actions, KBites
+/// browse tabs). Two layers with explicit precedence:
+///
+/// - `probed` — process environment + conventional-location probe. Synchronous,
+///   filled in `init()`, and the reason folder-open and the KBites browser
+///   survive with the daemon down.
+/// - `fromDaemon` — PATHS_GET, adopted asynchronously by the window root's
+///   loader task (on `daemon.generation` and `.paths` invalidations). WINS on
+///   merge: the daemon's MemoryWatcher is rooted at ITS ckfs root, so a
+///   divergent client root would silently mis-resolve memories, and a
+///   Finder-launched app's stale exported var is the likelier wrong answer.
 @Observable
 @MainActor
 final class GMCCEnvironment {
     private(set) var values: [GMCCEnvKey: String] = [:]
+
+    private var probed: [GMCCEnvKey: String] = [:]
+    private var fromDaemon: [GMCCEnvKey: String] = [:]
+    private var loadInFlight: Task<Void, Never>?
 
     subscript(key: GMCCEnvKey) -> String? { values[key] }
 
@@ -27,20 +38,15 @@ final class GMCCEnvironment {
         refresh()
     }
 
+    /// Synchronous fallback resolution (daemon-down path). Kept as the
+    /// "Re-scan" affordance too.
     func refresh() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let env = ProcessInfo.processInfo.environment
-        let zshrc = Self.scanZshrc(home: home)
 
         var out: [GMCCEnvKey: String] = [:]
         for key in GMCCEnvKey.allCases {
             if let value = env[key.rawValue], !value.isEmpty {
-                out[key] = value
-            } else if let value = zshrc[key], !value.contains("$") {
-                // A value still containing "$" references a variable the
-                // single-purpose scan couldn't expand — drop it so the
-                // conventional-location probe below takes over instead of
-                // surfacing a garbage literal path.
                 out[key] = value
             }
         }
@@ -67,63 +73,63 @@ final class GMCCEnvironment {
                 }
             }
         }
-        if values != out { values = out }
+        if probed != out { probed = out }
+        publish()
     }
 
-    /// Minimal single-purpose scan: `export GMCC_*=...` lines only, with `~`
-    /// and `$HOME`/`$GMCC_CKFS_ROOT` expansion — not a shell interpreter.
-    private static func scanZshrc(home: URL) -> [GMCCEnvKey: String] {
-        let zshrc = home.appendingPathComponent(".zshrc")
-        guard let contents = try? String(contentsOf: zshrc, encoding: .utf8) else { return [:] }
-
-        let pattern = /^\s*export\s+([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$/
-        var raw: [String: String] = [:]
-        for rawLine in contents.split(whereSeparator: \.isNewline) {
-            let line = String(rawLine)
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("#") { continue }
-            guard let match = try? pattern.firstMatch(in: line) else { continue }
-            raw[String(match.output.1)] = stripQuotes(String(match.output.2))
+    /// Single-flight PATHS_GET — the env is a process-wide singleton, so N
+    /// windows' loader tasks must cost ONE round trip on the fairness-free
+    /// serial queue, not N (and not 2N on the reconnect stampede, when the
+    /// generation restart and the `.paths` yield from invalidateAll() both
+    /// fire).
+    func loadFromDaemon() async {
+        if let running = loadInFlight {
+            await running.value
+            return
         }
-
-        var out: [GMCCEnvKey: String] = [:]
-        // ckfsRoot first, then GMCC_KBITE (a common intermediate the kbite
-        // keys reference even though it's no longer surfaced as a key).
-        var expansions = ["HOME": home.path]
-        if let root = raw[GMCCEnvKey.ckfsRoot.rawValue].map({ expand($0, vars: expansions, home: home) }) {
-            out[.ckfsRoot] = root
-            expansions[GMCCEnvKey.ckfsRoot.rawValue] = root
-        }
-        if let kbite = raw["GMCC_KBITE"].map({ expand($0, vars: expansions, home: home) }) {
-            expansions["GMCC_KBITE"] = kbite
-        }
-        for key in GMCCEnvKey.allCases where key != .ckfsRoot {
-            if let value = raw[key.rawValue] {
-                out[key] = expand(value, vars: expansions, home: home)
+        let task = Task { @MainActor in
+            do {
+                let response = try await GMCCDaemonService.shared.paths()
+                adopt(response)
+            } catch {
+                // Probe keeps serving; log so a divergent-root situation
+                // (daemon root ≠ probed root) is at least diagnosable.
+                NSLog("GMVibes: PATHS_GET failed, keeping probed roots: %@",
+                      String(describing: error))
             }
         }
-        return out
+        loadInFlight = task
+        await task.value
+        loadInFlight = nil
     }
 
-    private static func stripQuotes(_ s: String) -> String {
-        var value = s
-        if (value.hasPrefix("\"") && value.hasSuffix("\"") && value.count >= 2) ||
-           (value.hasPrefix("'") && value.hasSuffix("'") && value.count >= 2) {
-            value = String(value.dropFirst().dropLast())
+    /// Adopt the daemon's typed roots (PATHS_GET). Strictly an overlay — the
+    /// probe stays underneath so a daemon restart never blanks the env.
+    /// Roots move as a SET: when the daemon answers with a ckfs root but the
+    /// kbite roots are unset daemon-side, they are derived from the daemon's
+    /// root rather than left pointing at probe-derived paths under a
+    /// possibly-different root.
+    func adopt(_ paths: PathsGetResponse) {
+        var out: [GMCCEnvKey: String] = [:]
+        if !paths.ckfsRoot.isEmpty { out[.ckfsRoot] = paths.ckfsRoot }
+        if !paths.kbiteDigestedRoot.isEmpty { out[.kbiteDigested] = paths.kbiteDigestedRoot }
+        if !paths.kbiteOpenRoot.isEmpty { out[.kbiteOpen] = paths.kbiteOpenRoot }
+        if let root = out[.ckfsRoot] {
+            let kbites = URL(fileURLWithPath: root, isDirectory: true)
+                .appendingPathComponent("kbites", isDirectory: true)
+            if out[.kbiteDigested] == nil {
+                out[.kbiteDigested] = kbites.appendingPathComponent("digested").path
+            }
+            if out[.kbiteOpen] == nil {
+                out[.kbiteOpen] = kbites.appendingPathComponent("open").path
+            }
         }
-        return value
+        if fromDaemon != out { fromDaemon = out }
+        publish()
     }
 
-    private static func expand(_ value: String, vars: [String: String], home: URL) -> String {
-        var out = value
-        if out == "~" {
-            out = home.path
-        } else if out.hasPrefix("~/") {
-            out = home.appendingPathComponent(String(out.dropFirst(2))).path
-        }
-        for (name, replacement) in vars.sorted(by: { $0.key.count > $1.key.count }) {
-            out = out.replacingOccurrences(of: "${\(name)}", with: replacement)
-            out = out.replacingOccurrences(of: "$\(name)", with: replacement)
-        }
-        return out
+    private func publish() {
+        let merged = probed.merging(fromDaemon) { _, daemon in daemon }
+        if values != merged { values = merged }   // change-gated (house idiom)
     }
 }

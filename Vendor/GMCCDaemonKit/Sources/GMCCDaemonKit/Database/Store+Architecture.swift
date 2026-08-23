@@ -89,7 +89,10 @@ extension Store {
             ])
             try self.appendEvent(
                 db, kind: .architectureChange, subjectUuid: req.summaryUuid,
-                payload: Store.jsonPayload(["action": "persist_add", "seq": seq, "file_path": path]))
+                payload: Store.jsonPayload([
+                    "action": "persist_add", "seq": seq, "file_path": path,
+                    "prompt_uuid": summary.promptUuid,
+                ]))
             let touched = try self.touchedPaths(db, promptUuid: summary.promptUuid)
             guard let change = try self.fetchPersistenceChanges(
                 db, summaryUuid: req.summaryUuid, touched: touched
@@ -110,7 +113,7 @@ extension Store {
                 throw StoreError.notFound(entity: "architecture_persistence_change", key: req.persistenceChangeUuid)
             }
             let summaryUuid: String = parent["architecture_summary_uuid"]
-            _ = try self.requireArchSummary(db, uuid: summaryUuid, at: .drafting, verb: "field-add")
+            let summary = try self.requireArchSummary(db, uuid: summaryUuid, at: .drafting, verb: "field-add")
             if req.isForeignKey, (req.fkTarget ?? "").isEmpty {
                 throw StoreError.badRequest(detail: "--fk-target is required with --foreign-key")
             }
@@ -135,6 +138,7 @@ extension Store {
                 payload: Store.jsonPayload([
                     "action": "field_add", "persistence_change_uuid": req.persistenceChangeUuid,
                     "field_name": req.fieldName,
+                    "prompt_uuid": summary.promptUuid,
                 ]))
             guard let field = try self.fetchFieldChanges(db, changeUuid: req.persistenceChangeUuid)
                 .first(where: { $0.uuid == uuid }) else {
@@ -168,7 +172,10 @@ extension Store {
             ])
             try self.appendEvent(
                 db, kind: .architectureChange, subjectUuid: req.summaryUuid,
-                payload: Store.jsonPayload(["action": "general_add", "seq": seq, "file_path": path]))
+                payload: Store.jsonPayload([
+                    "action": "general_add", "seq": seq, "file_path": path,
+                    "prompt_uuid": summary.promptUuid,
+                ]))
             let touched = try self.touchedPaths(db, promptUuid: summary.promptUuid)
             guard let change = try self.fetchGeneralChanges(
                 db, summaryUuid: req.summaryUuid, touched: touched
@@ -199,15 +206,17 @@ extension Store {
 
     public func archGet(_ req: ArchGetRequest) throws -> ArchGetResponse {
         try dbQueue.read { db in
-            guard try Row.fetchOne(
-                db, sql: "SELECT 1 FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
-            ) != nil else {
+            guard let promptCreatedAt = try String.fetchOne(
+                db, sql: "SELECT created_at FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
+            ) else {
                 throw StoreError.notFound(entity: "prompt", key: req.promptUuid)
             }
             guard let summary = try self.fetchArchitectureSummary(db, byPrompt: req.promptUuid) else {
-                // Legacy prompts legally have none — the bot falls back to the
-                // ckfs architecture artifact (gm artifact list).
-                throw StoreError.notFound(entity: "architecture_summary", key: req.promptUuid)
+                // A6: prompt exists — discriminated SUMMARY_ABSENT (legacy ⇒
+                // read the ckfs artifact; current ⇒ gm arch open).
+                throw StoreError.summaryAbsent(
+                    entity: "architecture", promptUuid: req.promptUuid,
+                    promptIsLegacy: try self.isLegacyPrompt(db, createdAt: promptCreatedAt))
             }
             let touched = try self.touchedPaths(db, promptUuid: req.promptUuid)
             let persistence = try self.fetchPersistenceChanges(db, summaryUuid: summary.uuid, touched: touched)
@@ -328,14 +337,18 @@ extension Store {
             }
             guard from == requireFrom, from.allowedNext.contains(to) else {
                 throw StoreError.invalidEntityTransition(
-                    entity: "architecture", from: from.rawValue, to: to.rawValue, reason: nil)
+                    entity: "architecture", from: from.rawValue, to: to.rawValue,
+                    reason: "\(action) runs from \(requireFrom.rawValue) — this summary is \(from.rawValue)")
             }
             try self.updateBase(
                 db, table: "architecture_summary", uuid: summaryUuid,
                 expectedVersion: expectedVersion, set: ["status": to.rawValue])
             try self.appendEvent(
                 db, kind: .architectureChange, subjectUuid: summaryUuid,
-                payload: Store.jsonPayload(["action": action, "from": from.rawValue, "to": to.rawValue]))
+                payload: Store.jsonPayload([
+                    "action": action, "from": from.rawValue, "to": to.rawValue,
+                    "prompt_uuid": summary.promptUuid,
+                ]))
             try self.touchSessionForPrompt(db, promptUuid: summary.promptUuid)
             guard let updated = try self.fetchArchitectureSummary(db, uuid: summaryUuid) else {
                 throw StoreError.notFound(entity: "architecture_summary", key: summaryUuid)

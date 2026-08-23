@@ -26,33 +26,40 @@ public enum GitHead {
         branch.replacingOccurrences(of: "/", with: "__")
     }
 
+    /// The directory holding HEAD for `repoRoot` — `<root>/.git` normally, or
+    /// the followed `gitdir:` target for worktrees and submodules. nil when
+    /// absent or unreadable (COMMON: instance rows point at paths that no
+    /// longer exist). Exposed so the checkout watcher and the resolver agree
+    /// on the path by construction rather than by parallel implementation.
+    public static func gitDirectory(repoRoot: String) -> String? {
+        let gitPath = repoRoot + "/.git"
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDirectory) else {
+            return nil
+        }
+        if isDirectory.boolValue {
+            return gitPath
+        }
+        // .git is a FILE: "gitdir: <path>". Follow one level.
+        guard let content = readSmallFile(gitPath),
+              content.hasPrefix("gitdir:") else {
+            return nil
+        }
+        var gitdir = String(content.dropFirst("gitdir:".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !gitdir.hasPrefix("/") {
+            gitdir = repoRoot + "/" + gitdir
+        }
+        return gitdir
+    }
+
     /// Resolve the checked-out state of the repo at `repoRoot`.
     /// Handles the `.git`-as-file `gitdir:` indirection (worktrees emit an
     /// absolute gitdir, submodules a relative one — both resolved against the
     /// containing directory).
     public static func resolve(repoRoot: String) -> State {
-        let gitPath = repoRoot + "/.git"
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDirectory) else {
-            return .unavailable
-        }
-        let headPath: String
-        if isDirectory.boolValue {
-            headPath = gitPath + "/HEAD"
-        } else {
-            // .git is a FILE: "gitdir: <path>". Follow one level.
-            guard let content = readSmallFile(gitPath),
-                  content.hasPrefix("gitdir:") else {
-                return .unavailable
-            }
-            var gitdir = String(content.dropFirst("gitdir:".count))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !gitdir.hasPrefix("/") {
-                gitdir = repoRoot + "/" + gitdir
-            }
-            headPath = gitdir + "/HEAD"
-        }
-        guard let head = readSmallFile(headPath) else {
+        guard let gitdir = gitDirectory(repoRoot: repoRoot),
+              let head = readSmallFile(gitdir + "/HEAD") else {
             return .unavailable
         }
         let line = head.trimmingCharacters(in: .whitespacesAndNewlines)

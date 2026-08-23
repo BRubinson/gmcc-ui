@@ -94,7 +94,10 @@ extension Store {
             ])
             try self.appendEvent(
                 db, kind: .clarificationChange, subjectUuid: req.summaryUuid,
-                payload: Store.jsonPayload(["action": "ask", "seq": seq, "category": req.category.rawValue]))
+                payload: Store.jsonPayload([
+                    "action": "ask", "seq": seq, "category": req.category.rawValue,
+                    "prompt_uuid": summary.promptUuid,
+                ]))
             guard let row = try self.fetchClarificationRow(db, uuid: uuid) else {
                 throw StoreError.notFound(entity: "clarification", key: uuid)
             }
@@ -146,6 +149,7 @@ extension Store {
                 db, kind: .clarificationChange, subjectUuid: row.clarificationSummaryUuid,
                 payload: Store.jsonPayload([
                     "action": req.skip ? "skip" : "answer", "clarification_uuid": req.clarificationUuid,
+                    "prompt_uuid": summary.promptUuid,
                 ]))
             guard let updated = try self.fetchClarificationRow(db, uuid: req.clarificationUuid) else {
                 throw StoreError.notFound(entity: "clarification", key: req.clarificationUuid)
@@ -222,16 +226,19 @@ extension Store {
 
     public func clarifyGet(_ req: ClarifyGetRequest) throws -> ClarifyGetResponse {
         try dbQueue.read { db in
-            guard try Row.fetchOne(
-                db, sql: "SELECT 1 FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
-            ) != nil else {
+            guard let promptCreatedAt = try String.fetchOne(
+                db, sql: "SELECT created_at FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
+            ) else {
                 throw StoreError.notFound(entity: "prompt", key: req.promptUuid)
             }
             guard let summary = try self.fetchClarificationSummary(db, byPrompt: req.promptUuid) else {
-                // Missing-backing-rows tolerance: legacy prompts legally have
-                // no summary — a typed NOT_FOUND tells the bot to fall back to
-                // the ckfs artifacts (gm artifact list).
-                throw StoreError.notFound(entity: "clarification_summary", key: req.promptUuid)
+                // A6: the prompt EXISTS (guard above) — this absence is a
+                // discriminated SUMMARY_ABSENT, not NOT_FOUND. promptIsLegacy
+                // tells the caller its branch: legacy ⇒ read the ckfs artifact
+                // (never fabricate rows); current ⇒ open a summary.
+                throw StoreError.summaryAbsent(
+                    entity: "clarification", promptUuid: req.promptUuid,
+                    promptIsLegacy: try self.isLegacyPrompt(db, createdAt: promptCreatedAt))
             }
             let rows = try self.fetchClarificationRows(db, summaryUuid: summary.uuid)
             return ClarifyGetResponse(summary: summary, clarifications: rows)
@@ -256,14 +263,18 @@ extension Store {
             }
             guard from == requireFrom, from.allowedNext.contains(to) else {
                 throw StoreError.invalidEntityTransition(
-                    entity: "clarification", from: from.rawValue, to: to.rawValue, reason: nil)
+                    entity: "clarification", from: from.rawValue, to: to.rawValue,
+                    reason: "\(action) runs from \(requireFrom.rawValue) — this summary is \(from.rawValue)")
             }
             try self.updateBase(
                 db, table: "clarification_summary", uuid: summaryUuid,
                 expectedVersion: expectedVersion, set: ["status": to.rawValue])
             try self.appendEvent(
                 db, kind: .clarificationChange, subjectUuid: summaryUuid,
-                payload: Store.jsonPayload(["action": action, "from": from.rawValue, "to": to.rawValue]))
+                payload: Store.jsonPayload([
+                    "action": action, "from": from.rawValue, "to": to.rawValue,
+                    "prompt_uuid": summary.promptUuid,
+                ]))
             guard let updated = try self.fetchClarificationSummary(db, uuid: summaryUuid) else {
                 throw StoreError.notFound(entity: "clarification_summary", key: summaryUuid)
             }

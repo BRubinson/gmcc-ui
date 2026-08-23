@@ -62,6 +62,13 @@ public enum DaemonEventKind: String, Codable, Hashable, CaseIterable, Sendable {
     /// replay cursor) — emitted by MemoryWatcher when a prompt's memory/
     /// directory changes on disk.
     case promptMemoryChange = "PROMPT_MEMORY_CHANGED"
+    /// Ephemeral broadcast only (id 0, never a daemon_event row, never a
+    /// replay cursor) — emitted when an instance repo's HEAD changes on disk.
+    /// Payload: {"instance_uuid", "head_state", "current_branch"|null,
+    ///           "current_session_code"|null}; subject_uuid = the instance
+    /// uuid. On reconnect ask INSTANCE_CURRENT_SESSION once rather than
+    /// replaying.
+    case checkoutChange = "CHECKOUT_CHANGE"
 }
 
 /// The four registry levels a kbite can be activated at. rawValue drives the
@@ -284,7 +291,11 @@ public struct StatusResponse: Codable, Hashable, Sendable {
     public let socketPath: String
     public let dbPath: String
     public let schemaVersion: Int
+    /// Row census only — MUST NOT be used as an event cursor; use
+    /// `lastEventId` for that.
     public let tableCounts: [TableCount]
+    /// The real event-log horizon: highest daemon_event.id at status time.
+    public let lastEventId: Int64
     public let startedAt: String
     public let uptimeSeconds: Int
 
@@ -295,6 +306,7 @@ public struct StatusResponse: Codable, Hashable, Sendable {
         dbPath: String,
         schemaVersion: Int,
         tableCounts: [TableCount],
+        lastEventId: Int64,
         startedAt: String,
         uptimeSeconds: Int
     ) {
@@ -304,6 +316,7 @@ public struct StatusResponse: Codable, Hashable, Sendable {
         self.dbPath = dbPath
         self.schemaVersion = schemaVersion
         self.tableCounts = tableCounts
+        self.lastEventId = lastEventId
         self.startedAt = startedAt
         self.uptimeSeconds = uptimeSeconds
     }
@@ -691,9 +704,14 @@ public struct PromptCreateRequest: Codable, Hashable, Sendable {
 /// empty list.
 public struct PromptListRequest: Codable, Hashable, Sendable {
     public let sessionUuid: String?
+    /// When true each stub carries its `reports` enrichment block (one call
+    /// replaces the per-prompt CLARIFY_GET/ARCH_GET fan-out). Optional so a
+    /// v8 client omitting it decodes as false.
+    public let withReports: Bool?
 
-    public init(sessionUuid: String? = nil) {
+    public init(sessionUuid: String? = nil, withReports: Bool? = nil) {
         self.sessionUuid = sessionUuid
+        self.withReports = withReports
     }
 }
 
@@ -1080,6 +1098,47 @@ public struct KbiteSearchResponse: Codable, Hashable, Sendable {
     public let hits: [KbiteSearchHit]
 
     public init(hits: [KbiteSearchHit]) {
+        self.hits = hits
+    }
+}
+
+// MARK: - SEARCH
+
+/// The six searchable row kinds. Raw values match the source table names.
+public enum SearchKind: String, Codable, Hashable, CaseIterable, Sendable {
+    case prompt
+    case clarification
+    case clarificationSummary = "clarification_summary"
+    case architectureSummary = "architecture_summary"
+    case architectureGeneralChange = "architecture_general_change"
+    case architecturePersistenceChange = "architecture_persistence_change"
+}
+
+/// FTS5 full-text search over prompt/clarification/architecture text —
+/// ranked stubs with prompt lineage, never full content (the SEARCH
+/// counterpart of KBITE_SEARCH). nil sessionUuid = whole db; a
+/// supplied-but-unknown uuid is NOT_FOUND, never a silent empty list.
+/// A query with no searchable tokens is BAD_REQUEST.
+public struct SearchRequest: Codable, Hashable, Sendable {
+    public let query: String
+    public let sessionUuid: String?
+    /// nil/empty = every kind.
+    public let kinds: [SearchKind]?
+    /// Clamped 1…500, default 50.
+    public let limit: Int?
+
+    public init(query: String, sessionUuid: String? = nil, kinds: [SearchKind]? = nil, limit: Int? = nil) {
+        self.query = query
+        self.sessionUuid = sessionUuid
+        self.kinds = kinds
+        self.limit = limit
+    }
+}
+
+public struct SearchResponse: Codable, Hashable, Sendable {
+    public let hits: [SearchHit]
+
+    public init(hits: [SearchHit]) {
         self.hits = hits
     }
 }
@@ -1555,12 +1614,16 @@ public struct SessionResolveResponse: Codable, Hashable, Sendable {
     /// The slugged code of whatever IS checked out (nil when detached or
     /// unavailable). Slugging is forward-only: branch / → __, never unslugged.
     public let currentSessionCode: String?
+    /// The RAW branch name (nil whenever head_state != "branch"). The code
+    /// stays slugged; the two are never interconverted client-side.
+    public let currentBranch: String?
 
-    public init(session: SessionRow, checkedOut: Bool, headState: String, currentSessionCode: String?) {
+    public init(session: SessionRow, checkedOut: Bool, headState: String, currentSessionCode: String?, currentBranch: String?) {
         self.session = session
         self.checkedOut = checkedOut
         self.headState = headState
         self.currentSessionCode = currentSessionCode
+        self.currentBranch = currentBranch
     }
 }
 
@@ -1578,11 +1641,14 @@ public struct InstanceCurrentSessionResponse: Codable, Hashable, Sendable {
     public let session: SessionStub?
     public let headState: String
     public let currentSessionCode: String?
+    /// The RAW branch name (nil whenever head_state != "branch").
+    public let currentBranch: String?
 
-    public init(session: SessionStub?, headState: String, currentSessionCode: String?) {
+    public init(session: SessionStub?, headState: String, currentSessionCode: String?, currentBranch: String?) {
         self.session = session
         self.headState = headState
         self.currentSessionCode = currentSessionCode
+        self.currentBranch = currentBranch
     }
 }
 

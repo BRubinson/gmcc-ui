@@ -135,12 +135,21 @@ struct CreatePromptView: View {
             }
             // Give the prompt its filesystem presence (memory/ for bot
             // artifacts) — the daemon owns the row, the app owns the folder.
-            if let sessionStub, let root = gmcc[.ckfsRoot], !root.isEmpty {
-                let folder = CkfsPathResolver.conventionalPromptFolder(
-                    ckfsRoot: root, session: sessionStub, seq: row.seq, code: row.code)
-                let memory = folder.appendingPathComponent("memory", isDirectory: true)
-                try? FileManager.default.createDirectory(
-                    at: memory, withIntermediateDirectories: true)
+            // Created at the daemon-returned storage path VERBATIM: the
+            // daemon's MemoryWatcher matches that string exactly, so a slugged
+            // folder of our own would never receive PROMPT_MEMORY_CHANGED
+            // (spaces/capitals in the dirname are the accepted cost).
+            if let root = gmcc[.ckfsRoot], !root.isEmpty {
+                let folder: URL? = row.ckfsRelativeStoragePath.isEmpty
+                    ? sessionStub.map { CkfsPathResolver.conventionalPromptFolder(
+                          ckfsRoot: root, session: $0, seq: row.seq, code: row.code) }
+                    : URL(fileURLWithPath: root, isDirectory: true)
+                          .appendingPathComponent(row.ckfsRelativeStoragePath, isDirectory: true)
+                if let folder {
+                    let memory = folder.appendingPathComponent("memory", isDirectory: true)
+                    try? FileManager.default.createDirectory(
+                        at: memory, withIntermediateDirectories: true)
+                }
             }
             await store.refresh()
             isSaving = false

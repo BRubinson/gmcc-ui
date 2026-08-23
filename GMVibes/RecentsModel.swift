@@ -3,10 +3,9 @@ import Observation
 import GMCCDaemonKit
 
 /// One session surfaced on the landing page's Recent Sessions strip. Recency
-/// is the newest file-change activity in the session (SessionActivityModel's
-/// one-call fold), falling back to the stub's created/updated dates — the
-/// prompt-edit half of "latest prompt or file change" is a written daemon gap
-/// (PromptStub carries no timestamps on wire v6).
+/// is the stub's `lastActivityAt` — computed daemon-side as MAX(session
+/// updated, newest prompt update, newest file change), a strict superset of
+/// the retired client-side FILE_CHANGE_LIST fold.
 struct RecentSessionCard: Identifiable, Equatable {
     let windowID: SessionWindowID
     let sessionName: String
@@ -40,9 +39,9 @@ struct ProjectInstanceGroup: Identifiable, Equatable {
     var id: String { projectUuid }
 }
 
-/// Read-only derivation over the CatalogStore snapshot + the activity fold.
-/// Owns no persisted state and issues no I/O — the landing view refreshes the
-/// catalog/activity (event-driven) and re-derives.
+/// Read-only derivation over the CatalogStore snapshot. Owns no persisted
+/// state and issues no I/O — the landing view refreshes the catalog
+/// (event-driven) and re-derives.
 @Observable
 @MainActor
 final class RecentsModel {
@@ -60,7 +59,7 @@ final class RecentsModel {
         self.sessionLimit = sessionLimit
     }
 
-    func refresh(catalog: CatalogStore, activity: SessionActivityModel) {
+    func refresh(catalog: CatalogStore) {
         var sessions: [RecentSessionCard] = []
         var groups: [ProjectInstanceGroup] = []
 
@@ -80,6 +79,9 @@ final class RecentsModel {
                     // A malformed uuid must skip the row, never mint a random
                     // identity (a fabricated uuid churns SwiftUI ids).
                     guard let sessionUUID = UUID(uuidString: stub.uuid) else { continue }
+                    // Defensive: lastActivityAt should always parse; an
+                    // unparseable value falls back to created/updated.
+                    let activity = parse(stub.lastActivityAt)
                     let fallback = max(parse(stub.createdAt), parse(stub.updatedAt))
                     sessions.append(RecentSessionCard(
                         windowID: SessionWindowID(
@@ -92,7 +94,7 @@ final class RecentsModel {
                         projectName: project.name,
                         instanceName: instance.name,
                         instanceUuid: instance.uuid,
-                        activity: activity.latestBySession[stub.uuid] ?? fallback
+                        activity: activity == .distantPast ? fallback : activity
                     ))
                 }
             }
@@ -105,7 +107,15 @@ final class RecentsModel {
             ))
         }
 
-        sessions.sort { $0.activity > $1.activity }
+        // Code tiebreak: lastActivityAt is seconds-granularity so ties are
+        // common, Swift's sort is unstable, and an unstable order under the
+        // change-gated publication below would thrash the strip (and flicker
+        // sessions across the prefix boundary).
+        sessions.sort {
+            $0.activity == $1.activity
+                ? $0.sessionCode < $1.sessionCode
+                : $0.activity > $1.activity
+        }
         let topSessions = Array(sessions.prefix(sessionLimit))
         if recentSessions != topSessions { recentSessions = topSessions }
         if projectGroups != groups { projectGroups = groups }
@@ -113,6 +123,10 @@ final class RecentsModel {
 
     private func parse(_ raw: String) -> Date {
         if let cached = dateCache[raw] { return cached }
+        // The hot key is now lastActivityAt, which mints a NEW string on
+        // every file change — unlike the old created/updated keys the cache
+        // was designed around, it no longer saturates. Bound it.
+        if dateCache.count > 2048 { dateCache.removeAll(keepingCapacity: true) }
         let parsed = Self.isoFormatter.date(from: raw) ?? .distantPast
         dateCache[raw] = parsed
         return parsed

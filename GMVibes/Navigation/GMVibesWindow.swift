@@ -6,6 +6,8 @@ import SwiftUI
 /// root instead of pushing onto a `NavigationStack`.
 struct GMVibesWindow: View {
     @Environment(\.openWindow) private var openWindow
+    @Environment(DaemonConnectionModel.self) private var daemon
+    @Environment(GMCCEnvironment.self) private var gmcc
     @State private var nav: WindowNav
 
     init(seed: WindowSeed) {
@@ -68,6 +70,18 @@ struct GMVibesWindow: View {
             if nav.paletteOpen { CommandPalette() }
         }
         .focusedSceneValue(\.commandPalette) { nav.paletteOpen = true }
+        // PATHS_GET loader at the window root (not Landing — instance-only
+        // windows need it too). GMCCEnvironment's env fetch can't live in its
+        // synchronous init; the probe seeds values there and the daemon's
+        // typed roots overlay them here on every generation bump and on
+        // CONFIG_SET (.paths). Coalescing is the env's own change-gate.
+        .task(id: daemon.generation) {
+            let paths = daemon.hub.stream(for: .paths)
+            await gmcc.loadFromDaemon()   // single-flight — N windows, 1 RPC
+            for await _ in paths {
+                await gmcc.loadFromDaemon()
+            }
+        }
         .environment(nav)
     }
 

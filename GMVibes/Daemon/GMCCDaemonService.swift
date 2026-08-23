@@ -157,6 +157,29 @@ actor GMCCDaemonService {
         return try await perform { try $0.setPromptStatus(req) }
     }
 
+    // MARK: - Clarification / architecture (v7, read-only)
+
+    func clarification(promptUuid: String) async throws -> ClarifyGetResponse {
+        let uuid = Self.normalized(promptUuid)
+        return try await perform { try $0.clarifyGet(ClarifyGetRequest(promptUuid: uuid)) }
+    }
+
+    func architecture(promptUuid: String) async throws -> ArchGetResponse {
+        let uuid = Self.normalized(promptUuid)
+        return try await perform { try $0.archGet(ArchGetRequest(promptUuid: uuid)) }
+    }
+
+    // MARK: - Git state / paths (v7)
+
+    func instanceCurrentSession(instanceUuid: String) async throws -> InstanceCurrentSessionResponse {
+        let uuid = Self.normalized(instanceUuid)
+        return try await perform { try $0.instanceCurrentSession(InstanceCurrentSessionRequest(instanceUuid: uuid)) }
+    }
+
+    func paths() async throws -> PathsGetResponse {
+        try await perform { try $0.pathsGet() }
+    }
+
     // MARK: - File change / artifact
 
     // Retained for session prompt 2 (annotated diffs) even though SESSION_GET's

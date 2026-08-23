@@ -6,8 +6,13 @@ import GRDB
 public enum StoreError: Error, Sendable {
     case notFound(entity: String, key: String)
     case versionConflict(entity: String, uuid: String, expected: Int64, actual: Int64)
-    case invalidTransition(from: PromptStatus, to: PromptStatus)
+    case invalidTransition(from: PromptStatus, to: PromptStatus, reason: String?)
     case contentLocked(status: PromptStatus)
+    /// The prompt EXISTS but has no clarification/architecture summary — kept
+    /// distinct from notFound because the caller's branch differs materially:
+    /// a legacy prompt means fall back to ckfs artifacts, a current prompt
+    /// means open a summary.
+    case summaryAbsent(entity: String, promptUuid: String, promptIsLegacy: Bool)
     /// A guarded update with no fields set — rejected instead of burning the
     /// version other editors hold and emitting an empty audit event.
     case emptyUpdate(entity: String)
@@ -29,10 +34,18 @@ public enum StoreError: Error, Sendable {
             return ErrorPayload(
                 code: .versionConflict,
                 message: "\(entity) \(uuid): expected version \(expected), actual \(actual)")
-        case .invalidTransition(let from, let to):
+        case .invalidTransition(let from, let to, let reason):
+            let suffix = reason.map { " (\($0))" } ?? ""
             return ErrorPayload(
                 code: .invalidTransition,
-                message: "illegal prompt transition \(from.rawValue) → \(to.rawValue)")
+                message: "illegal prompt transition \(from.rawValue) → \(to.rawValue)\(suffix)")
+        case .summaryAbsent(let entity, let uuid, let legacy):
+            return ErrorPayload(
+                code: .summaryAbsent,
+                message: legacy
+                    ? "prompt \(uuid) predates the db-native lifecycle and has no \(entity) — read the ckfs artifact instead (gm artifact list --prompt-uuid \(uuid)); never fabricate backing rows"
+                    : "prompt \(uuid) has no \(entity) yet — open one (gm clarify open / gm arch open --prompt-uuid \(uuid))",
+                promptIsLegacy: legacy)
         case .contentLocked(let status):
             return ErrorPayload(
                 code: .contentLocked,
@@ -196,10 +209,34 @@ public final class Store: @unchecked Sendable {
         return path
     }
 
+    /// The storage-path analogue of GitHead.sessionCode: forward-only, lossy,
+    /// NEVER un-slugged. Applied when deriving a prompt's ckfs folder segment
+    /// so names with spaces/slashes can't produce paths the MemoryWatcher's
+    /// exact-match resolution would miss. Case is preserved (lowercasing
+    /// would change more than needed). Existing rows are never rewritten.
+    static func slugStorageSegment(_ raw: String) -> String {
+        var slug = ""
+        for ch in raw {
+            if ch.isASCII, ch.isLetter || ch.isNumber || ch == "." || ch == "_" || ch == "-" {
+                slug.append(ch)
+            } else if !slug.hasSuffix("_") {
+                slug.append("_")
+            }
+        }
+        while slug.contains("__") { slug = slug.replacingOccurrences(of: "__", with: "_") }
+        // ASCII-only by construction, so 80 characters == 80 bytes (the ckfs
+        // folder-name budget). Cap BEFORE trimming so truncation can't leave
+        // a trailing separator.
+        if slug.count > 80 { slug = String(slug.prefix(80)) }
+        while let first = slug.first, first == "_" || first == "." { slug.removeFirst() }
+        while let last = slug.last, last == "_" || last == "." { slug.removeLast() }
+        return slug.isEmpty ? "prompt" : slug
+    }
+
     /// daemon_event.payload is documented as JSON — always build it with a
     /// real serializer so embedded quotes/backslashes in values (file paths!)
     /// can't produce malformed rows.
-    static func jsonPayload(_ object: [String: Any]) -> String? {
+    public static func jsonPayload(_ object: [String: Any]) -> String? {
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
             return nil
         }

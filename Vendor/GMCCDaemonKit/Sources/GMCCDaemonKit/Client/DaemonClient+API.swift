@@ -53,6 +53,12 @@ extension DaemonClient {
         try request(type: .catalogSearch, payload: req, responseType: CatalogSearchResponse.self)
     }
 
+    // MARK: - Full-text search (v8)
+
+    public func search(_ req: SearchRequest) throws -> SearchResponse {
+        try request(type: .search, payload: req, responseType: SearchResponse.self)
+    }
+
     // MARK: - Session
 
     public func getSession(_ req: SessionGetRequest) throws -> SessionGetResponse {

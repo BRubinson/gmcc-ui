@@ -129,6 +129,6 @@ struct InactiveSessionsSheet: View {
         .onAppear { deriveRows() }
         .onChange(of: query) { _, _ in deriveRows() }
         .onChange(of: catalog.sessionsByInstance) { _, _ in deriveRows() }
-        .onChange(of: checkout.branchByInstance) { _, _ in deriveRows() }
+        .onChange(of: checkout.stateByInstance) { _, _ in deriveRows() }
     }
 }

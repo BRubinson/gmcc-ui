@@ -11,9 +11,8 @@ final class GMVibesServices {
     let fileTrees: FileTreeStore
     let daemon: DaemonConnectionModel
     let catalog: CatalogStore
-    /// Session recency (one unfiltered FILE_CHANGE_LIST fold).
-    let activity: SessionActivityModel
-    /// Checked-out branch per instance (.git/HEAD reader + DispatchSource).
+    /// Checked-out session per instance (DispatchSource push edge +
+    /// daemon-side INSTANCE_CURRENT_SESSION resolution).
     let checkout: CheckoutWatcher
 
     init() {
@@ -21,7 +20,6 @@ final class GMVibesServices {
         fileTrees = FileTreeStore.shared
         daemon = DaemonConnectionModel()
         catalog = CatalogStore()
-        activity = SessionActivityModel()
         checkout = CheckoutWatcher()
     }
 }
@@ -34,7 +32,6 @@ extension View {
             .environment(services.fileTrees)
             .environment(services.daemon)
             .environment(services.catalog)
-            .environment(services.activity)
             .environment(services.checkout)
     }
 }

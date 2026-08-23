@@ -17,6 +17,13 @@ final class InvalidationHub {
         case session(String)
         case prompt(String)
         case changes
+        /// PROMPT_MEMORY_CHANGED for one prompt's memory/ dir. The event is
+        /// ephemeral (id 0, no replay) — disconnect-window changes are lost,
+        /// so subscribers must also refetch on the generation bump (which
+        /// `invalidateAll()` covers by yielding every domain).
+        case memories(String)
+        /// PATHS_GET inputs changed (CONFIG_SET) — the env should refetch.
+        case paths
     }
 
     private var continuations: [Domain: [UUID: AsyncStream<Void>.Continuation]] = [:]
@@ -43,8 +50,9 @@ final class InvalidationHub {
         continuations[domain]?.values.forEach { $0.yield() }
     }
 
-    /// CREATE_PROMPT and FILE_CHANGE events carry no session uuid on the wire,
-    /// so they fan out to every open session observer, each of which re-queries.
+    /// Degradation path: UPDATE_PROMPT / PROMPT_STATUS_CHANGE carry no session
+    /// uuid on the wire, and CREATE_PROMPT / FILE_CHANGE payloads can be absent
+    /// on replayed pre-v7 rows — those fan out to every open session observer.
     func invalidateAllSessions() {
         for (domain, conts) in continuations {
             if case .session = domain {

@@ -33,7 +33,12 @@ extension Store {
                     sql: "SELECT ckfs_relative_storage_path FROM session WHERE uuid = ?",
                     arguments: [req.sessionUuid]) ?? ""
                 if !sessionPath.isEmpty {
-                    ckfsPath = "\(sessionPath)/prompts/\(seq)_\(req.name)"
+                    // A4: the name is slugged (forward-only, lossy) so the
+                    // stored path — which the MemoryWatcher matches by exact
+                    // case-sensitive equality — never contains spaces/slashes.
+                    // Clients MUST use this returned path verbatim, never
+                    // re-derive {seq}_{name} themselves.
+                    ckfsPath = "\(sessionPath)/prompts/\(seq)_\(Store.slugStorageSegment(req.name))"
                 }
             }
             let uuid = try self.insertBase(db, table: "prompt", uuid: req.uuid, extra: [
@@ -87,7 +92,8 @@ extension Store {
                     throw StoreError.notFound(entity: "session", key: sessionUuid)
                 }
             }
-            return PromptListResponse(prompts: try self.fetchPromptStubs(db, sessionUuid: req.sessionUuid))
+            return PromptListResponse(prompts: try self.fetchPromptStubs(
+                db, sessionUuid: req.sessionUuid, withReports: req.withReports ?? false))
         }
     }
 
@@ -176,7 +182,12 @@ extension Store {
                 throw StoreError.corruptState(entity: "prompt", detail: "status '\(statusRaw)'")
             }
             guard from.allowedNext.contains(req.status) else {
-                throw StoreError.invalidTransition(from: from, to: req.status)
+                throw StoreError.invalidTransition(
+                    from: from, to: req.status,
+                    reason: from.allowedNext.isEmpty
+                        ? "\(from.rawValue) is terminal"
+                        : "legal next from \(from.rawValue): "
+                            + from.allowedNext.map(\.rawValue).sorted().joined(separator: ", "))
             }
             let legacy = try self.isLegacyPrompt(db, createdAt: head["created_at"])
             switch (from, req.status) {
@@ -269,6 +280,7 @@ extension Store {
             command: row["command"],
             status: row["status"],
             ckfsRelativeStoragePath: row["ckfs_relative_storage_path"],
+            isLegacy: try isLegacyPrompt(db, createdAt: row["created_at"]),
             createdAt: row["created_at"],
             updatedAt: row["updated_at"]
         )

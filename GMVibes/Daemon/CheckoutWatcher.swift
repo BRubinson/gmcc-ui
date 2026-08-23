@@ -1,43 +1,13 @@
 import Foundation
 import Observation
+import GMCCDaemonKit
 
-/// The exact rule `gm` uses to derive `session.code` from a git branch
-/// (`GitContext.sessionCode` in the daemon's ContextOptions.swift): ONLY
-/// `/` → `__`. No case folding, no punctuation folding.
-///
-/// Do NOT use `CkfsPathResolver.slug()` for branch comparison — that is the
-/// prompt-FOLDER naming rule and folds far more aggressively; a branch like
-/// `Feature/Login` or `release-v1.2` would silently never match its session.
-enum GitSlug {
-    static func sessionCode(forBranch branch: String) -> String {
-        branch.replacingOccurrences(of: "/", with: "__")
-    }
-}
-
-/// Where the checked-out-branch signal comes from. Placeholder implementation
-/// reads the repo directly; a future daemon call (SESSION_RESOLVE /
-/// INSTANCE_CURRENT_SESSION — written as a goal to the gmcc project) replaces
-/// it behind this protocol.
-protocol CheckedOutBranchSource: Sendable {
-    /// The branch checked out at a repo root, or nil (detached HEAD, not a
-    /// repo, unreadable).
-    func branch(atRepoRoot root: String) -> String?
-}
-
-/// Reads `.git/HEAD` — a tiny `ref: refs/heads/<branch>` file — instead of
-/// spawning `git`: a syscall, not a subprocess, and it needs no daemon
-/// traffic, so the serial-queue fairness constraint can't be violated.
-struct GitHeadFileReader: CheckedOutBranchSource {
-    func branch(atRepoRoot root: String) -> String? {
-        guard let head = try? String(contentsOf: Self.headURL(forRepoRoot: root), encoding: .utf8)
-        else { return nil }
-        let trimmed = head.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("ref: refs/heads/") else { return nil }   // detached HEAD
-        return String(trimmed.dropFirst("ref: refs/heads/".count))
-    }
-
-    /// Resolves worktree/submodule indirection: `.git` may be a FILE reading
-    /// `gitdir: <path>`.
+/// Locates the real `.git` directory for a repo root, resolving worktree /
+/// submodule indirection (`.git` may be a FILE reading `gitdir: <path>`).
+/// The DispatchSource must open an fd on the RESOLVED directory — the kit's
+/// `GitHead` does this indirection internally but exposes no gitdir URL, so
+/// this stays app-side even though branch reading moved daemon-side.
+enum GitDirLocator {
     static func gitDirURL(forRepoRoot root: String) -> URL {
         // isDirectory: true — a file-typed base drops its last component
         // during relative resolution, sending submodule gitdirs one level up.
@@ -52,50 +22,95 @@ struct GitHeadFileReader: CheckedOutBranchSource {
         }
         return dotGit
     }
-
-    static func headURL(forRepoRoot root: String) -> URL {
-        gitDirURL(forRepoRoot: root).appendingPathComponent("HEAD")
-    }
 }
 
-/// Per-instance checked-out-branch cache. Event-driven: a DispatchSource
-/// watches each watched instance's `.git` directory and re-reads HEAD on
-/// change — no polling loop, no timer, no git subprocess. Views track
-/// `branchByInstance` through @Observable; no invalidation domain needed.
+/// Per-instance checked-out-session cache. The push edge is unchanged — a
+/// DispatchSource watches each instance's `.git` directory (there is no
+/// branch-change event on the wire, so the file watcher is irreplaceable) —
+/// but resolution moved daemon-side: a fire schedules a debounced
+/// INSTANCE_CURRENT_SESSION, which returns the resolved session stub plus a
+/// typed head state. `GitSlug`/`GitHeadFileReader` (the app's duplicate of the
+/// daemon's derivation) are gone.
 @Observable
 @MainActor
 final class CheckoutWatcher {
-    /// Branch (raw, un-slugged) by instance uuid. nil entry = unknown/detached.
-    private(set) var branchByInstance: [String: String] = [:]
+    /// Mirrors the wire's `head_state` string. `unavailable` (path gone / not
+    /// a repo) is NOT `detached` (a real checkout with no branch) — the
+    /// instance page says different things about them. Unknown wire values
+    /// degrade to `.unavailable` rather than fabricating state.
+    enum HeadState: Equatable, Sendable {
+        case branch
+        case detached
+        case unavailable
 
-    private let source: CheckedOutBranchSource
-    private var watchers: [String: DispatchSourceFileSystemObject] = [:]
-    private var watchedPaths: [String: String] = [:]   // instanceUuid → repo root
-
-    init(source: CheckedOutBranchSource = GitHeadFileReader()) {
-        self.source = source
+        init(wire: String) {
+            switch wire {
+            case "branch": self = .branch
+            case "detached": self = .detached
+            default: self = .unavailable
+            }
+        }
     }
+
+    struct CheckoutState: Equatable, Sendable {
+        let headState: HeadState
+        /// Slugged session code (forward-only rule, daemon-derived). Display
+        /// via `CkfsPathResolver.unslugBranch` only — never compare unslugged.
+        let currentSessionCode: String?
+        let session: SessionStub?
+    }
+
+    /// Last-known state per instance uuid. Kept on RPC failure — checked-out
+    /// state is a display signal, and a daemon restart must not blank every
+    /// green ring. Absent entry = never resolved.
+    private(set) var stateByInstance: [String: CheckoutState] = [:]
+
+    private var watchers: [String: DispatchSourceFileSystemObject] = [:]
+    private var watchedPaths: [String: String] = [:]   // instanceUuid → repo root (watcher armed)
+    /// instanceUuid → repo root we last TRIED, regardless of open() outcome.
+    /// Keyed separately from watchedPaths so a failed open (missing volume,
+    /// clone in progress) still suppresses re-resolution on every catalog
+    /// refresh — watchedPaths only records successes so the watcher itself
+    /// keeps retrying.
+    private var attemptedPaths: [String: String] = [:]
+    /// Per-instance trailing coalesce: a `git checkout` writes `.git` several
+    /// times, and each fire is now a round trip on the fairness-free serial
+    /// queue — the burst must collapse to ONE resolve.
+    private var resolveTasks: [String: Task<Void, Never>] = [:]
+
+    private let service = GMCCDaemonService.shared
+
+    // MARK: - Reads
 
     /// Is this session the checked-out one on its instance?
-    /// `session.code` IS the slugged branch (GitSlug rule).
+    /// `session.code` IS the slugged branch; the daemon's code is authoritative.
     func isCheckedOut(sessionCode: String, instanceUuid: String) -> Bool {
-        guard let branch = branchByInstance[instanceUuid] else { return false }
-        return GitSlug.sessionCode(forBranch: branch) == sessionCode
+        stateByInstance[instanceUuid]?.currentSessionCode == sessionCode
     }
 
-    /// The slugged code of the checked-out branch on an instance (to find the
-    /// matching session row), or nil.
+    /// The slugged code of the checked-out branch on an instance, or nil.
     func checkedOutCode(instanceUuid: String) -> String? {
-        branchByInstance[instanceUuid].map(GitSlug.sessionCode(forBranch:))
+        stateByInstance[instanceUuid]?.currentSessionCode
     }
 
-    /// (Re)target the watcher set. One read + one DispatchSource per instance;
-    /// instances whose repo path vanished are dropped.
+    /// The resolved session row for the checked-out branch, or nil (detached,
+    /// unavailable, or no matching session row).
+    func currentSession(instanceUuid: String) -> SessionStub? {
+        stateByInstance[instanceUuid]?.session
+    }
+
+    // MARK: - Watch management
+
+    /// (Re)target the watcher set. Instances whose repo path vanished are
+    /// dropped. Resolution fires only for NEW/changed instances — this is
+    /// called after every catalog refresh and must not burst N RPCs.
     func watch(instances: [(uuid: String, repoPath: String)]) {
         let wanted = Dictionary(instances.map { ($0.uuid, $0.repoPath) },
                                 uniquingKeysWith: { first, _ in first })
 
-        for uuid in watchedPaths.keys where wanted[uuid] == nil {
+        // Iterate attemptedPaths, not watchedPaths: an instance whose open()
+        // failed still has resolve state to clear when it leaves the catalog.
+        for uuid in attemptedPaths.keys where wanted[uuid] == nil {
             dropWatcher(instanceUuid: uuid)
         }
 
@@ -104,12 +119,12 @@ final class CheckoutWatcher {
         }
     }
 
-    /// Add one instance to the watch set without dropping the others (the
-    /// instance page calls this defensively; `watch(instances:)` replaces).
+    /// Add one instance to the watch set without dropping the others.
     /// A failed `open()` is NOT recorded, so a repo that appears later (clone
     /// in progress, unmounted volume) gets retried on the next call.
     func ensureWatching(instanceUuid: String, repoPath: String) {
-        refresh(instanceUuid: instanceUuid, repoPath: repoPath)
+        let isNewAttempt = attemptedPaths[instanceUuid] != repoPath
+        attemptedPaths[instanceUuid] = repoPath
         if watchedPaths[instanceUuid] != repoPath {
             watchers[instanceUuid]?.cancel()
             watchers[instanceUuid] = nil
@@ -119,26 +134,69 @@ final class CheckoutWatcher {
                 watchedPaths[instanceUuid] = repoPath
             }
         }
+        // Resolve when the instance is new/changed or has never resolved
+        // successfully — NOT unconditionally (see watch(instances:)). A
+        // failed open() no longer counts as "new" forever: attemptedPaths
+        // records the try, so a bot's .changes-driven catalog refreshes can't
+        // re-fire this RPC every 750ms for an unmounted repo.
+        if isNewAttempt || stateByInstance[instanceUuid] == nil {
+            scheduleResolve(instanceUuid: instanceUuid)
+        }
     }
 
     private func dropWatcher(instanceUuid: String) {
         watchers[instanceUuid]?.cancel()
         watchers[instanceUuid] = nil
         watchedPaths[instanceUuid] = nil
-        if branchByInstance[instanceUuid] != nil {
-            branchByInstance[instanceUuid] = nil
+        attemptedPaths[instanceUuid] = nil
+        resolveTasks[instanceUuid]?.cancel()
+        resolveTasks[instanceUuid] = nil
+        if stateByInstance[instanceUuid] != nil {
+            stateByInstance[instanceUuid] = nil
         }
     }
 
-    private func refresh(instanceUuid: String, repoPath: String) {
-        let branch = source.branch(atRepoRoot: repoPath)
-        if branchByInstance[instanceUuid] != branch {
-            branchByInstance[instanceUuid] = branch
+    // MARK: - Resolution (daemon-side)
+
+    private func scheduleResolve(instanceUuid: String) {
+        resolveTasks[instanceUuid]?.cancel()
+        // The slot is NOT cleared from inside the task: a task past its sleep
+        // can't be stopped, and clearing unconditionally after the RPC would
+        // erase a SUCCESSOR's registration (letting a third fire run
+        // concurrently and a superseded response publish stale state). The
+        // entry is overwritten by the next schedule and cleared by
+        // dropWatcher; a completed task's handle is inert.
+        resolveTasks[instanceUuid] = Task { [weak self] in
+            // Coalesce git's multi-write checkout burst into one RPC.
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, let self else { return }
+            await self.resolve(instanceUuid: instanceUuid)
+        }
+    }
+
+    private func resolve(instanceUuid: String) async {
+        do {
+            let response = try await service.instanceCurrentSession(instanceUuid: instanceUuid)
+            // Superseded mid-RPC (a newer fire cancelled us) or dropped —
+            // never publish a stale response over a newer one.
+            guard !Task.isCancelled else { return }
+            let new = CheckoutState(
+                headState: HeadState(wire: response.headState),
+                currentSessionCode: response.currentSessionCode,
+                session: response.session
+            )
+            if stateByInstance[instanceUuid] != new {
+                stateByInstance[instanceUuid] = new
+            }
+        } catch {
+            // Keep the last known state — a down daemon must not clear the
+            // checked-out ring. The next watcher fire (or a new-instance
+            // ensureWatching) retries.
         }
     }
 
     private func makeWatcher(instanceUuid: String, repoPath: String) -> DispatchSourceFileSystemObject? {
-        let gitDir = GitHeadFileReader.gitDirURL(forRepoRoot: repoPath)
+        let gitDir = GitDirLocator.gitDirURL(forRepoRoot: repoPath)
         let fd = open(gitDir.path, O_EVTONLY)
         guard fd >= 0 else { return nil }
         let watcher = DispatchSource.makeFileSystemObjectSource(
@@ -157,7 +215,7 @@ final class CheckoutWatcher {
                 self.watchedPaths[instanceUuid] = nil
                 self.ensureWatching(instanceUuid: instanceUuid, repoPath: repoPath)
             } else {
-                self.refresh(instanceUuid: instanceUuid, repoPath: repoPath)
+                self.scheduleResolve(instanceUuid: instanceUuid)
             }
         }
         watcher.setCancelHandler { close(fd) }

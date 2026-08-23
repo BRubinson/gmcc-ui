@@ -276,7 +276,7 @@ private struct KBitesPaneView: View {
 
     private var emptyMessage: String {
         guard let path = gmcc[root.envKey] else {
-            return "\(root.envKey.rawValue) is not set in ~/.zshrc."
+            return "\(root.envKey.rawValue) couldn't be resolved from the daemon or a conventional location."
         }
         return "No kbites at\n\(path)"
     }

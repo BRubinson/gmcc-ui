@@ -245,28 +245,6 @@ private struct PromptNavRow: View {
     }
 }
 
-private struct PromptStatusBadge: View {
-    let status: PromptStatus?
-    var body: some View {
-        Text(label)
-            .font(.caption2.weight(.medium))
-            .padding(.horizontal, 7).padding(.vertical, 2)
-            .background(color.opacity(0.18), in: .capsule)
-            .foregroundStyle(color)
-    }
-    private var label: String { status?.rawValue.capitalized ?? "—" }
-    private var color: Color {
-        switch status {
-        case .draft:        return .orange
-        case .clarifying:   return .blue
-        case .architecting: return .purple
-        case .implementing: return .teal
-        case .reviewing:    return .indigo
-        case .done:         return .green
-        case .none:         return .gray
-        }
-    }
-}
 
 // MARK: - Editor pane
 
@@ -297,6 +275,9 @@ private struct PromptEditorPane: View {
         var repoFolder: URL?
         var promptFolder: URL?
         var memoryRoot: URL?
+        /// True when memoryRoot is the exact directory PROMPT_MEMORY_CHANGED
+        /// describes (see CkfsPathResolver.ResolvedMemory).
+        var memoryIsDaemonWatched = false
     }
 
     @State private var backstory = ""
@@ -330,12 +311,19 @@ private struct PromptEditorPane: View {
     // Find-in-page over content; Memories tab state.
     @State private var find = FindController()
     @State private var memoriesModel = MemoriesExplorerModel()
-    @Environment(\.openWindow) private var openWindow
+    // Phase document state: the clarification/architecture read model (scope-
+    // memoized) + per-section expansion, seeded from the prompt's status.
+    @State private var phases: PromptPhaseStore
+    @State private var clarifyExpanded = false
+    @State private var archExpanded = false
+    @Environment(WindowNav.self) private var nav
 
     init(stub: PromptStub, scope: SessionScope, windowID: SessionWindowID) {
         self.stub = stub
         self.scope = scope
         self.windowID = windowID
+        // Create-or-get, same init-safety contract as SessionScopeCache.scope.
+        _phases = State(initialValue: scope.phases(forPrompt: stub.uuid))
         // PANE-owned box under a globally-unique key: each pane's unsaved
         // draft is its own registry entry (no shared-key eviction, no clobber
         // between two panes on one prompt — the shared actor version-checks
@@ -352,6 +340,22 @@ private struct PromptEditorPane: View {
     // status refresh lands).
     private var editable: Bool {
         PromptStatus(rawValue: stub.status) == .draft && saveIssue != .locked
+    }
+
+    /// Draft prompts provably have no summaries — fetching would burst two
+    /// guaranteed NOT_FOUNDs per selection onto the serial queue.
+    private var phasesApply: Bool {
+        PromptStatus(rawValue: stub.status) != .draft
+    }
+
+    /// Post-draft, the clarification's refined goal/detail SUPERSEDE the
+    /// frozen originals — they render as primary, originals in a disclosure.
+    private var refinedContent: (goal: String, detail: String)? {
+        guard !editable, case .loaded(let response) = phases.clarification else { return nil }
+        let goal = response.summary.refinedGoal
+        let detail = response.summary.refinedDetail
+        if goal.isEmpty && detail.isEmpty { return nil }
+        return (goal, detail)
     }
 
     // MARK: Find-in-page
@@ -404,8 +408,10 @@ private struct PromptEditorPane: View {
             } else if loaded {
                 initialTab
                     .inspector(isPresented: $showMemories) {
+                        // Column min must exceed the explorer's summed pane
+                        // minimums (160 + 240) or AppKit fights the layout.
                         memoriesTab
-                            .inspectorColumnWidth(min: 280, ideal: 340, max: 520)
+                            .inspectorColumnWidth(min: 420, ideal: 480, max: 720)
                     }
             } else {
                 ProgressView().controlSize(.regular)
@@ -449,19 +455,24 @@ private struct PromptEditorPane: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     if NSEvent.modifierFlags.contains(.command), let root = paths.memoryRoot {
-                        openWindow(value: WindowSeed(.promptMemories(PromptMemoriesWindowID(
+                        // Navigate THIS window to the memories page (route-
+                        // switched view, Back returns to the editor) — not a
+                        // separate OS window.
+                        nav.go(.promptMemories(PromptMemoriesWindowID(
                             memoryRootURL: root,
                             promptName: stub.name,
                             selectedFile: memoriesModel.selectedFile,
-                            expanded: Array(memoriesModel.expanded)
-                        ))))
+                            expanded: Array(memoriesModel.expanded),
+                            promptUuid: stub.uuid,
+                            isDaemonWatched: paths.memoryIsDaemonWatched
+                        )))
                     } else {
                         showMemories.toggle()
                     }
                 } label: {
                     Label("Memories", systemImage: "folder")
                 }
-                .help("Memory file explorer — \u{2318}-click to open in a separate window")
+                .help("Memory file explorer — \u{2318}-click to open as a full page")
                 tierCluster
             }
         }
@@ -470,24 +481,46 @@ private struct PromptEditorPane: View {
         // which has the dirty-buffer guard — NEVER through a re-seed. (Keying
         // on the whole stub re-ran load() on every autosave: stub carries
         // `version`.)
-        .task(id: stub.uuid) { await load() }
+        .task(id: stub.uuid) {
+            await load()
+            if phasesApply {
+                seedPhaseExpansion()
+                // Memoized store — a re-selection of an already-loaded prompt
+                // must not re-issue two guaranteed round trips (105 legacy
+                // prompts answer NOT_FOUND every time). The event loop below
+                // still refreshes on every real mutation.
+                if !phases.hasLoaded { await phases.refresh(daemon: daemon) }
+            }
+        }
         // Targeted refresh + echo/kbite/path reconciliation on this prompt's
         // events. Stream hoisted before any await so no invalidation is lost.
+        // CLARIFICATION_CHANGE/ARCHITECTURE_CHANGE also land here (via the
+        // summary registry), so the phase store refreshes on the same domain.
         .task(id: stub.uuid) {
             let stream = daemon.hub.stream(for: .prompt(stub.uuid))
             for await _ in stream {
+                // Trailing debounce: clarify/arch events fire PER ROW (a bot
+                // clarify phase = 10 events) and this handler is several
+                // RPCs; events landing during the sleep buffer (newest-1)
+                // into the next iteration.
+                try? await Task.sleep(for: .milliseconds(300))
                 await store.refreshPrompt(uuid: stub.uuid)
                 await reconcileExternal()
                 reconcileKbites()
                 await resolvePaths()
+                if phasesApply { await phases.refresh(daemon: daemon) }
             }
         }
         // Status transitions (draft→clarifying→…→done) flip `editable` via
-        // the stub; adopt the frozen server content only when the buffer is clean.
+        // the stub. Store refresh + reconciliation ride the .prompt event arm
+        // (PROMPT_STATUS_CHANGE routes there) — this handler only re-seeds
+        // emphasis and fetches phases with a FRESH capture: the event loop's
+        // captured self can hold a stale pre-transition status, so its
+        // `phasesApply` misses the draft → clarifying boundary.
         .onChange(of: stub.status) { _, _ in
-            Task {
-                await store.refreshPrompt(uuid: stub.uuid)
-                await reconcileExternal()
+            if phasesApply {
+                seedPhaseExpansion()
+                Task { await phases.refresh(daemon: daemon) }
             }
         }
         // cmd+F opens the inline find bar over the three sections; nil while
@@ -537,6 +570,7 @@ private struct PromptEditorPane: View {
                 }
                 ScrollView {
                     VStack(spacing: 16) {
+                        PromptLifecycleBar(stub: stub, phases: phases, store: store)
                         saveIssueBanner
                         if !editable {
                             // The initial prompt is read-only once past draft;
@@ -549,10 +583,34 @@ private struct PromptEditorPane: View {
                         KBitePillBox(available: availableKbites, selected: $selectedKbites)
                         sectionEditor("Backstory", field: .backstory, text: $backstory,
                                       minHeight: 90, hint: "Narrative context (inherited from the session).")
-                        sectionEditor("Goal", field: .goal, text: $goal,
-                                      minHeight: 120, hint: "The outcome / acceptance criteria.")
-                        sectionEditor("Detail", field: .detail, text: $detail,
-                                      minHeight: 220, hint: "The approach, constraints, specifics.")
+                        if let refined = refinedContent, !refined.goal.isEmpty {
+                            refinedSection("Goal", refined: refined.goal, original: goal)
+                        } else {
+                            sectionEditor("Goal", field: .goal, text: $goal,
+                                          minHeight: 120, hint: "The outcome / acceptance criteria.")
+                        }
+                        if let refined = refinedContent, !refined.detail.isEmpty {
+                            refinedSection("Detail", refined: refined.detail, original: detail)
+                        } else {
+                            sectionEditor("Detail", field: .detail, text: $detail,
+                                          minHeight: 220, hint: "The approach, constraints, specifics.")
+                        }
+                        phaseCard("Clarification", systemImage: "questionmark.bubble",
+                                  expanded: $clarifyExpanded) {
+                            if phasesApply {
+                                ClarificationPane(phase: phases.clarification)
+                            } else {
+                                notStarted("Clarification begins when the prompt leaves Draft.")
+                            }
+                        }
+                        phaseCard("Architecture", systemImage: "square.stack.3d.up",
+                                  expanded: $archExpanded) {
+                            if phasesApply {
+                                ArchitecturePane(phase: phases.architecture)
+                            } else {
+                                notStarted("Architecture begins after clarification completes.")
+                            }
+                        }
                     }
                     .padding(20)
                     .frame(maxWidth: 900, alignment: .leading)
@@ -575,9 +633,15 @@ private struct PromptEditorPane: View {
                     .buttonStyle(.bordered).controlSize(.small)
             }
         } else if saveIssue == .locked {
+            // No undo-history promise: the Undo toolbar hides with `editable`
+            // and a locked prompt can't be written anyway. The buffers are
+            // still on screen — offer a copy instead.
             banner(color: .blue, icon: "lock.fill",
-                   text: "This prompt left Draft — content is now read-only. Your unsaved edits were kept in undo history.") {
-                EmptyView()
+                   text: "This prompt left Draft — content is now read-only. Your unsaved text is still shown below.") {
+                Button("Copy All") {
+                    Clipboard.copy("## Backstory\n\(backstory)\n\n## Goal\n\(goal)\n\n## Detail\n\(detail)")
+                }
+                .buttonStyle(.bordered).controlSize(.small)
             }
         } else if case .failed(let message) = saveIssue {
             banner(color: .red, icon: "xmark.octagon.fill",
@@ -610,10 +674,87 @@ private struct PromptEditorPane: View {
         return { stepFind(delta, proxy: proxy) }
     }
 
+    // MARK: Phase document sections
+
+    /// Persistent section card: sections NEVER disappear with status — status
+    /// only drives which one is expanded by default (seedPhaseExpansion).
+    private func phaseCard(_ title: String, systemImage: String,
+                           expanded: Binding<Bool>,
+                           @ViewBuilder content: () -> some View) -> some View {
+        let built = content()
+        return DisclosureGroup(isExpanded: expanded) {
+            built
+                .padding(.top, 8)
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 10))
+    }
+
+    private func notStarted(_ message: String) -> some View {
+        Label(message, systemImage: "hourglass")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+    }
+
+    /// Default emphasis by phase: the section the current status makes
+    /// relevant opens and the other closes; the user's later toggles are
+    /// never overridden except on a status change (which re-seeds
+    /// deliberately — emphasis follows the phase, not accumulation).
+    private func seedPhaseExpansion() {
+        switch PromptStatus(rawValue: stub.status) {
+        case .clarifying:
+            clarifyExpanded = true
+            archExpanded = false
+        case .architecting, .implementing, .reviewing:
+            archExpanded = true
+            clarifyExpanded = false
+        default:
+            break
+        }
+    }
+
+    /// Refined-by-clarification presentation: the refined text primary, the
+    /// frozen original tucked in a disclosure.
+    private func refinedSection(_ title: String, refined: String, original: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(title).font(.headline)
+                Label("Refined by clarification", systemImage: "wand.and.stars")
+                    .font(.caption)
+                    .foregroundStyle(.blue)
+            }
+            Text(refined)
+                .font(.callout)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(.blue.opacity(0.06), in: .rect(cornerRadius: 8))
+            if !original.isEmpty {
+                DisclosureGroup("Original \(title.lowercased())") {
+                    Text(original)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+                }
+                .font(.caption)
+            }
+        }
+    }
+
     @ViewBuilder
     private var memoriesTab: some View {
         if let root = paths.memoryRoot {
-            MemoriesExplorer(rootURL: root, model: memoriesModel)
+            MemoriesExplorer(
+                rootURL: root,
+                model: memoriesModel,
+                promptUuid: stub.uuid,
+                isDaemonWatched: paths.memoryIsDaemonWatched
+            )
         } else {
             ContentUnavailableView(
                 "No Memory Folder",
@@ -729,6 +870,7 @@ private struct PromptEditorPane: View {
         let seq = stub.seq
         let code = stub.code
         let name = stub.name
+        let storagePath = stub.ckfsRelativeStoragePath
         let resolved: ResolvedPaths = await Task.detached(priority: .userInitiated) {
             var p = ResolvedPaths()
             if let path = instance?.absoluteFileSystemPath, !path.isEmpty {
@@ -741,10 +883,13 @@ private struct PromptEditorPane: View {
                 p.sessionFolder = CkfsPathResolver.resolve(
                     relative: sessionStub.ckfsRelativeStoragePath, ckfsRoot: root)
                 p.promptFolder = CkfsPathResolver.promptFolder(
-                    ckfsRoot: root, session: sessionStub, seq: seq, code: code, name: name)
-                p.memoryRoot = CkfsPathResolver.memoryRoot(
                     ckfsRoot: root, session: sessionStub, seq: seq, code: code, name: name,
-                    artifacts: artifacts)
+                    storagePath: storagePath)
+                let memory = CkfsPathResolver.memoryRoot(
+                    ckfsRoot: root, session: sessionStub, seq: seq, code: code, name: name,
+                    storagePath: storagePath, artifacts: artifacts)
+                p.memoryRoot = memory.root
+                p.memoryIsDaemonWatched = memory.isDaemonWatched
             }
             if let instance {
                 p.instanceFolder = CkfsPathResolver.resolve(
@@ -973,146 +1118,5 @@ private struct PromptEditorPane: View {
         // Bot commands resolve prompts by their daemon-allocated per-session seq.
         Clipboard.copy(tier.command(for: Int(stub.seq)))
         selectedTier = tier
-    }
-}
-
-// MARK: - Bot fidelity tiers
-
-// The three GMCC bot fidelity tiers. Each maps to a resume command that the
-// editor copies to the clipboard for the user to paste into Claude Code.
-enum BotTier: String, CaseIterable, Identifiable {
-    case gmBot     = "/gm_bot"
-    case gmBotRPI  = "/gm_bot_rpi"
-    case gmBotTeam = "/gm_bot_team"
-
-    var id: String { rawValue }
-    var command: String { rawValue }
-
-    // 1 / 2 / 3-person icons — increasing crew size by fidelity tier.
-    var symbol: String {
-        switch self {
-        case .gmBot:     return "person.fill"
-        case .gmBotRPI:  return "person.2.fill"
-        case .gmBotTeam: return "person.3.fill"
-        }
-    }
-
-    func command(for id: Int) -> String { "\(command) \(id)" }
-}
-
-// MARK: - Clipboard helper
-
-enum Clipboard {
-    static func copy(_ string: String) {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(string, forType: .string)
-    }
-}
-
-// MARK: - VS Code launcher
-
-enum VSCode {
-    // Opens a folder as a VS Code workspace. Prefers launching the app bundle
-    // directly (no dependency on the `code` CLI being on PATH); falls back to
-    // revealing the folder in Finder if VS Code isn't installed.
-    static func open(_ url: URL) {
-        let ws = NSWorkspace.shared
-        if let app = ws.urlForApplication(withBundleIdentifier: "com.microsoft.VSCode") {
-            let config = NSWorkspace.OpenConfiguration()
-            ws.open([url], withApplicationAt: app, configuration: config)
-        } else {
-            ws.activateFileViewerSelecting([url])
-        }
-    }
-}
-
-// MARK: - iTerm2 launcher
-
-// Opens an iTerm2 window rooted at `dir` via a PER-INSTANCE Dynamic Profile, so
-// windows/tabs spawned from it default to the same repo dir. The profile JSON is
-// rewritten in place (deterministic Guid) on every open; a single malformed file
-// disables ALL dynamic profiles, so we serialize/validate, then write atomically.
-// Falls back to NSWorkspace open-at-dir, then a Finder reveal — mirroring VSCode.
-enum ITerm {
-    // Writes the per-instance Dynamic Profile OFF the main thread, then opens the
-    // window ON the main thread. Both the file write and a cold-iTerm AppleScript
-    // launch are slow enough to hitch the UI if run inline from the button action.
-    static func open(dir: URL, instanceUUID: UUID, instanceName: String) {
-        let guid = "gmvibes-\(instanceUUID.uuidString)"
-        let name = "GMVibes — \(instanceName)"
-        Task.detached(priority: .userInitiated) {
-            let wrote = writeProfile(guid: guid, name: name, workingDir: dir.path)
-            await MainActor.run { launch(dir: dir, profileName: name, profileWritten: wrote) }
-        }
-    }
-
-    // Open a window for the per-instance profile, falling back to NSWorkspace
-    // open-at-dir, then a Finder reveal — mirroring VSCode. NSAppleScript must run
-    // on the main thread (TN2097), so this whole step is MainActor-isolated.
-    @MainActor
-    private static func launch(dir: URL, profileName: String, profileWritten: Bool) {
-        if profileWritten, runAppleScript(profileName: profileName) { return }
-        let ws = NSWorkspace.shared
-        if let term = ws.urlForApplication(withBundleIdentifier: "com.googlecode.iterm2") {
-            ws.open([dir], withApplicationAt: term, configuration: NSWorkspace.OpenConfiguration())
-        } else {
-            ws.activateFileViewerSelecting([dir])
-        }
-    }
-
-    // ~/Library/Application Support/iTerm2/DynamicProfiles, created if absent.
-    // `nonisolated` so the profile write can run off the main actor.
-    private nonisolated static func dynamicProfilesDir() -> URL? {
-        guard let appSup = FileManager.default.urls(for: .applicationSupportDirectory,
-                                                    in: .userDomainMask).first else { return nil }
-        let dir = appSup.appendingPathComponent("iTerm2/DynamicProfiles", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
-
-    // Idempotent per-instance profile file: gmvibes-<UUID>.json with one profile.
-    // JSONSerialization both validates the shape and renders the bytes we write.
-    // `nonisolated` so it can run off the main actor (pure FileManager/JSON work).
-    private nonisolated static func writeProfile(guid: String, name: String, workingDir: String) -> Bool {
-        guard let dir = dynamicProfilesDir() else { return false }
-        let payload: [String: Any] = ["Profiles": [[
-            "Guid": guid,
-            "Name": name,
-            "Custom Directory": "Yes",
-            "Working Directory": workingDir,
-        ]]]
-        guard JSONSerialization.isValidJSONObject(payload),
-              let data = try? JSONSerialization.data(withJSONObject: payload,
-                                                     options: [.prettyPrinted]) else { return false }
-        let url = dir.appendingPathComponent("\(guid).json")
-        let tmp = dir.appendingPathComponent(".\(guid).json.tmp")
-        do {
-            try data.write(to: tmp, options: .atomic)
-            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
-            return true
-        } catch {
-            try? FileManager.default.removeItem(at: tmp)
-            return false
-        }
-    }
-
-    // Open a window for the named profile (NSWorkspace can't select a profile).
-    // The AppleScript API is deprecated but functional; NSAppleScript drives it.
-    @MainActor
-    private static func runAppleScript(profileName: String) -> Bool {
-        // AppleScript string literals don't support backslash escaping — splice any
-        // embedded double quote in via the `quote` constant instead.
-        let escaped = profileName.replacingOccurrences(of: "\"", with: "\" & quote & \"")
-        let source = """
-        tell application "iTerm2"
-            create window with profile "\(escaped)"
-            activate
-        end tell
-        """
-        guard let script = NSAppleScript(source: source) else { return false }
-        var err: NSDictionary?
-        script.executeAndReturnError(&err)
-        return err == nil
     }
 }

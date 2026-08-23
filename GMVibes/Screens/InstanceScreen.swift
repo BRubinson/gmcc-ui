@@ -20,10 +20,10 @@ struct InstanceScreen: View {
 
     private var instance: InstanceRow? { catalog.instancesByUuid[instanceUuid] }
 
-    /// The session row matching the checked-out branch, if any.
+    /// The session row matching the checked-out branch, resolved daemon-side
+    /// (INSTANCE_CURRENT_SESSION) — no client-side catalog scan.
     private var activeStub: SessionStub? {
-        guard let code = checkout.checkedOutCode(instanceUuid: instanceUuid) else { return nil }
-        return (catalog.sessionsByInstance[instanceUuid] ?? []).first { $0.code == code }
+        checkout.currentSession(instanceUuid: instanceUuid)
     }
 
     /// The loaded session is no longer the checked-out one.
@@ -61,7 +61,7 @@ struct InstanceScreen: View {
             }
         }
         // Auto-load once when checkout state arrives after the catalog.
-        .onChange(of: checkout.branchByInstance[instanceUuid]) { _, _ in
+        .onChange(of: checkout.stateByInstance[instanceUuid]) { _, _ in
             ensureWatchingAndAutoLoad()
         }
         .sheet(isPresented: $showInactive) {
@@ -164,9 +164,16 @@ struct InstanceScreen: View {
     }
 
     private var noActiveMessage: String {
-        if let branch = checkout.branchByInstance[instanceUuid] {
-            return "The checked-out branch “\(branch)” has no matching session row on this instance."
+        switch checkout.stateByInstance[instanceUuid] {
+        case .some(let state) where state.headState == .branch:
+            let display = state.currentSessionCode.map(CkfsPathResolver.unslugBranch) ?? "?"
+            return "The checked-out branch “\(display)” has no matching session row on this instance."
+        case .some(let state) where state.headState == .detached:
+            return "This repo is on a detached HEAD — no branch is checked out."
+        case .some:
+            return "The instance's repo path is missing or unreadable."
+        case .none:
+            return "The checked-out branch hasn't been resolved yet (is the daemon running?)."
         }
-        return "No branch is checked out at this instance's repo (detached HEAD or unreadable checkout)."
     }
 }

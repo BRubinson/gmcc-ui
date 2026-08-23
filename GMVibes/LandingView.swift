@@ -11,7 +11,6 @@ struct LandingView: View {
     @Environment(GMCCEnvironment.self) private var gmcc
     @Environment(DaemonConnectionModel.self) private var daemon
     @Environment(CatalogStore.self) private var catalog
-    @Environment(SessionActivityModel.self) private var activity
     @Environment(CheckoutWatcher.self) private var checkout
     @Environment(WindowNav.self) private var nav
 
@@ -43,9 +42,11 @@ struct LandingView: View {
         // Re-render reactively when daemon health changes mid-session.
         .animation(.default, value: daemon.health)
         // Event-driven refresh (house idiom: streams hoisted first). Topology
-        // reloads the catalog; the .changes domain feeds the activity fold —
-        // its first subscriber. CheckoutWatcher is retargeted after each
-        // catalog refresh so its DispatchSources track the instance set.
+        // reloads the catalog; the .changes domain keeps recency live — file
+        // changes advance session.updated_at WITHOUT bumping version, so
+        // without this subscriber the strip would freeze until an unrelated
+        // topology event. CheckoutWatcher is retargeted after each catalog
+        // refresh so its DispatchSources track the instance set.
         .task(id: daemon.generation) {
             let topology = daemon.hub.stream(for: .topology)
             await refreshAll()
@@ -54,13 +55,14 @@ struct LandingView: View {
         .task(id: daemon.generation) {
             let changes = daemon.hub.stream(for: .changes)
             for await _ in changes {
-                // Debounce: .changes fires per FILE_CHANGE event, and the
-                // activity listing N+1s per row — a bot implement burst must
-                // coalesce into one refresh, not one per write. Events landing
-                // during the sleep buffer (newest-1) into the next iteration.
+                // Debounce: .changes fires per FILE_CHANGE event and the
+                // catalog refresh is three LIST calls on the fairness-free
+                // serial queue — a bot implement burst must coalesce into one
+                // refresh, not one per write. Events landing during the sleep
+                // buffer (newest-1) into the next iteration.
                 try? await Task.sleep(for: .milliseconds(750))
-                await activity.refresh()
-                recents.refresh(catalog: catalog, activity: activity)
+                await catalog.refresh()
+                recents.refresh(catalog: catalog)
             }
         }
         .sheet(isPresented: $showInactiveSessions) {
@@ -70,8 +72,7 @@ struct LandingView: View {
 
     private func refreshAll() async {
         await catalog.refresh()
-        await activity.refresh()
-        recents.refresh(catalog: catalog, activity: activity)
+        recents.refresh(catalog: catalog)
         checkout.watch(
             instances: catalog.instancesByUuid.values.compactMap { row in
                 row.absoluteFileSystemPath.isEmpty
@@ -438,7 +439,7 @@ private struct EnvWarningStrip: View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle")
                 .foregroundStyle(.orange)
-            Text("$GMCC_CKFS_ROOT is not set in ~/.zshrc — memory files and folder-open actions are unavailable.")
+            Text("The ckfs root couldn't be resolved from the daemon or a conventional location — memory files and folder-open actions are unavailable.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()

@@ -78,6 +78,7 @@ final class SessionScope {
 
     private weak var daemon: DaemonConnectionModel?
     private var savers: [String: PromptSaveActor] = [:]
+    private var phaseStores: [String: PromptPhaseStore] = [:]
 
     init(sessionUuid: String) {
         self.sessionUuid = sessionUuid
@@ -96,6 +97,7 @@ final class SessionScope {
     /// stops; panes own their draft boxes and flushed on their own teardown.
     func retire() {
         daemon?.unregisterSession(sessionUuid, ifOwnedBy: ObjectIdentifier(self))
+        for store in phaseStores.values { store.unregister() }
     }
 
     /// Memoized per prompt uuid so concurrent panes thread one version. The
@@ -105,6 +107,15 @@ final class SessionScope {
         if let existing = savers[promptUuid] { return existing }
         let fresh = PromptSaveActor(promptUuid: promptUuid, version: version)
         savers[promptUuid] = fresh
+        return fresh
+    }
+
+    /// Memoized per prompt uuid — N panes on one prompt share one
+    /// CLARIFY_GET + ARCH_GET pair (and one summary-routing registration).
+    func phases(forPrompt promptUuid: String) -> PromptPhaseStore {
+        if let existing = phaseStores[promptUuid] { return existing }
+        let fresh = PromptPhaseStore(promptUuid: promptUuid)
+        phaseStores[promptUuid] = fresh
         return fresh
     }
 }

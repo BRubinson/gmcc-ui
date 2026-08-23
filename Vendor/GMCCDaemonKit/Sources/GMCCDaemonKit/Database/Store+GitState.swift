@@ -19,12 +19,13 @@ extension Store {
                 FROM session s JOIN instance i ON i.uuid = s.instance_uuid
                 WHERE s.uuid = ?
                 """, arguments: [req.sessionUuid]) ?? ""
-            let (headState, currentCode) = Self.headSummary(repoRoot: instanceRoot)
+            let (headState, currentCode, currentBranch) = Self.headSummary(repoRoot: instanceRoot)
             return SessionResolveResponse(
                 session: session,
                 checkedOut: currentCode != nil && currentCode == session.code,
                 headState: headState,
-                currentSessionCode: currentCode
+                currentSessionCode: currentCode,
+                currentBranch: currentBranch
             )
         }
     }
@@ -39,7 +40,7 @@ extension Store {
             ) else {
                 throw StoreError.notFound(entity: "instance", key: req.instanceUuid)
             }
-            let (headState, currentCode) = Self.headSummary(repoRoot: instanceRoot)
+            let (headState, currentCode, currentBranch) = Self.headSummary(repoRoot: instanceRoot)
             var stub: SessionStub?
             if let code = currentCode {
                 // Same column list + last_activity_at shape as SESSION_LIST.
@@ -60,19 +61,24 @@ extension Store {
                 }
             }
             return InstanceCurrentSessionResponse(
-                session: stub, headState: headState, currentSessionCode: currentCode)
+                session: stub, headState: headState, currentSessionCode: currentCode,
+                currentBranch: currentBranch)
         }
     }
 
-    private static func headSummary(repoRoot: String) -> (state: String, code: String?) {
-        guard !repoRoot.isEmpty else { return ("unavailable", nil) }
+    /// The ONE head resolver — shared by the poll responses above and the
+    /// CHECKOUT_CHANGE broadcast path (server module), so the push event and
+    /// the poll responses can never disagree about what is checked out.
+    /// `branch` is the RAW branch name, nil unless state == "branch".
+    public static func headSummary(repoRoot: String) -> (state: String, code: String?, branch: String?) {
+        guard !repoRoot.isEmpty else { return ("unavailable", nil, nil) }
         switch GitHead.resolve(repoRoot: repoRoot) {
         case .branch(let branch):
-            return ("branch", GitHead.sessionCode(forBranch: branch))
+            return ("branch", GitHead.sessionCode(forBranch: branch), branch)
         case .detached:
-            return ("detached", nil)
+            return ("detached", nil, nil)
         case .unavailable:
-            return ("unavailable", nil)
+            return ("unavailable", nil, nil)
         }
     }
 }
