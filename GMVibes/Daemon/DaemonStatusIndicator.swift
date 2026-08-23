@@ -85,12 +85,18 @@ struct DaemonStatusPopover: View {
 
         if let counts = daemon.status?.tableCounts, !counts.isEmpty {
             Divider()
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 2) {
-                ForEach(counts, id: \.name) { table in
-                    row(table.name, "\(table.count)")
+            // The db has ~70 tables — unbounded this runs off the screen.
+            ScrollView(.vertical) {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 2) {
+                    ForEach(counts, id: \.name) { table in
+                        row(table.name, "\(table.count)")
+                    }
                 }
+                .font(.caption2.monospaced())
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .font(.caption2.monospaced())
+            .frame(maxHeight: 260)
+            .scrollBounceBehavior(.basedOnSize)
         }
     }
 
