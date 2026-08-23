@@ -89,4 +89,6 @@ fi
 
 echo ""
 echo "✅ Done: $DMG_PATH"
-[ -z "$DEV_ID" ] && echo "   (ad-hoc — unsigned for external distribution)"
+if [ -z "$DEV_ID" ]; then
+  echo "   (ad-hoc — unsigned for external distribution)"
+fi
