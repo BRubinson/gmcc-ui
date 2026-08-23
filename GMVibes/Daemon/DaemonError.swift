@@ -14,7 +14,13 @@ nonisolated enum DaemonError: Error, Equatable {
     /// Daemon reported an older protocol and the kit's respawn cycle still
     /// failed to retire it.
     case daemonTooOld(daemonVersion: Int?, message: String)
+    /// The uuid itself is unknown to the db — as of wire v8 ALWAYS a real
+    /// failure, never "no summary yet" (that is `summaryAbsent`).
     case notFound
+    /// The prompt exists but has no clarification/architecture summary.
+    /// `promptIsLegacy` is the daemon's own answer: true ⇒ pre-m0002 prompt
+    /// (normal absence — read the ckfs artifacts), false ⇒ never opened.
+    case summaryAbsent(promptIsLegacy: Bool)
     case versionConflict
     /// Illegal status edge OR an unmet daemon-side gate (they share one wire
     /// code). The daemon's reason string is preserved — it names which gate
@@ -36,6 +42,10 @@ nonisolated enum DaemonError: Error, Equatable {
         case .clientTooOld(let v): return "Daemon (wire v\(v)) is newer than this app — rebuild GMVibes."
         case .daemonTooOld(_, let m): return m
         case .notFound: return "Not in the GMCC database yet — run /import_legacy_yaml_gmcc."
+        case .summaryAbsent(let legacy):
+            return legacy
+                ? "This prompt predates the db-native clarification system."
+                : "Not opened yet — run the bot to start this phase."
         case .versionConflict: return "Edited elsewhere — reload to continue."
         case .invalidTransition(let reason): return reason ?? "That status change isn't allowed."
         case .contentLocked: return "Content is locked."
@@ -71,6 +81,7 @@ nonisolated enum DaemonError: Error, Equatable {
         case .server(let payload):
             switch payload.code {
             case .notFound: self = .notFound
+            case .summaryAbsent: self = .summaryAbsent(promptIsLegacy: payload.promptIsLegacy ?? false)
             case .versionConflict: self = .versionConflict
             case .invalidTransition: self = .invalidTransition(reason: payload.message.isEmpty ? nil : payload.message)
             case .contentLocked: self = .contentLocked

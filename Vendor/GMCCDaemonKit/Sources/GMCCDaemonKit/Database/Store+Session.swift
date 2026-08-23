@@ -69,10 +69,11 @@ extension Store {
 
     /// nil sessionUuid = every prompt in the db, grouped by session (seq is
     /// only unique per session, hence the two-column ORDER BY). withReports
-    /// attaches the per-prompt clarification/architecture summary stubs via
-    /// two grouped aggregate queries folded into dictionaries — one grouped
-    /// aggregation, never per-row (a per-prompt fetch here would be the N+1
-    /// the enrichment exists to delete).
+    /// attaches the per-prompt clarification/architecture/exploration/review
+    /// summary stubs via four grouped aggregate queries folded into
+    /// dictionaries — one grouped aggregation per machine, never per-row (a
+    /// per-prompt fetch here would be the N+1 the enrichment exists to
+    /// delete).
     func fetchPromptStubs(
         _ db: Database, sessionUuid: String?, withReports: Bool = false
     ) throws -> [PromptStub] {
@@ -95,6 +96,8 @@ extension Store {
         }
         var clar: [String: ClarificationReportStub] = [:]
         var arch: [String: ArchitectureReportStub] = [:]
+        var explore: [String: ExplorationReportStub] = [:]
+        var review: [String: ReviewReportStub] = [:]
         if withReports {
             let scope = sessionUuid == nil
                 ? ""
@@ -137,6 +140,53 @@ extension Store {
                     generalChangeCount: row["g_count"]
                 )
             }
+            for row in try Row.fetchAll(db, sql: """
+                SELECT cs.prompt_uuid, cs.uuid, cs.version, cs.status,
+                       (SELECT COUNT(*) FROM exploration_key_file kf
+                        WHERE kf.exploration_summary_uuid = cs.uuid) AS kf_count,
+                       COUNT(f.uuid) AS f_count,
+                       COALESCE(SUM(f.finding_rating < 100), 0) AS sub100_count,
+                       -- COUNT ignores NULLs, so this is real rows minus ranked
+                       -- rows; a bare SUM(finding_rating IS NULL) would count
+                       -- the LEFT JOIN's null-extended row on empty summaries.
+                       COUNT(f.uuid) - COUNT(f.finding_rating) AS unranked_count
+                FROM exploration_summary cs
+                LEFT JOIN exploration_finding f ON f.exploration_summary_uuid = cs.uuid
+                \(scope)
+                GROUP BY cs.uuid
+                """, arguments: scopeArgs) {
+                explore[row["prompt_uuid"]] = ExplorationReportStub(
+                    summaryUuid: row["uuid"],
+                    version: row["version"],
+                    status: row["status"],
+                    keyFileCount: row["kf_count"],
+                    findingCount: row["f_count"],
+                    sub100FindingCount: row["sub100_count"],
+                    unrankedFindingCount: row["unranked_count"]
+                )
+            }
+            for row in try Row.fetchAll(db, sql: """
+                SELECT cs.prompt_uuid, cs.uuid, cs.version, cs.status, cs.verdict,
+                       COUNT(f.uuid) AS f_count,
+                       COALESCE(SUM(f.finding_rating < 100), 0) AS sub100_count,
+                       COUNT(f.uuid) - COUNT(f.finding_rating) AS unranked_count,
+                       COALESCE(SUM(f.status = 'open'), 0) AS open_count
+                FROM review_summary cs
+                LEFT JOIN review_finding f ON f.review_summary_uuid = cs.uuid
+                \(scope)
+                GROUP BY cs.uuid
+                """, arguments: scopeArgs) {
+                review[row["prompt_uuid"]] = ReviewReportStub(
+                    summaryUuid: row["uuid"],
+                    version: row["version"],
+                    status: row["status"],
+                    verdict: row["verdict"],
+                    findingCount: row["f_count"],
+                    sub100FindingCount: row["sub100_count"],
+                    unrankedFindingCount: row["unranked_count"],
+                    openFindingCount: row["open_count"]
+                )
+            }
         }
         return try Row.fetchAll(db, sql: sql, arguments: arguments).map { row in
             let uuid: String = row["uuid"]
@@ -151,7 +201,9 @@ extension Store {
                 ckfsRelativeStoragePath: row["ckfs_relative_storage_path"],
                 isLegacy: try isLegacyPrompt(db, createdAt: row["created_at"]),
                 reports: withReports
-                    ? PromptReportsStub(clarification: clar[uuid], architecture: arch[uuid])
+                    ? PromptReportsStub(
+                        clarification: clar[uuid], architecture: arch[uuid],
+                        exploration: explore[uuid], review: review[uuid])
                     : nil,
                 createdAt: row["created_at"],
                 updatedAt: row["updated_at"]

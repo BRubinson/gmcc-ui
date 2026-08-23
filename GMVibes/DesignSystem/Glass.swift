@@ -51,13 +51,19 @@ struct Backdrop: View {
 struct CapsuleSearchField: View {
     let prompt: String
     @Binding var text: String
+    /// Optional external focus — the ⌘K palette must own first responder on
+    /// open. Defaulted so existing call sites compile unchanged.
+    var focus: FocusState<Bool>.Binding? = nil
 
     var body: some View {
         HStack {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
-            TextField(prompt, text: $text)
-                .textFieldStyle(.plain)
+            if let focus {
+                field.focused(focus)
+            } else {
+                field
+            }
             if !text.isEmpty {
                 Button { text = "" } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -69,6 +75,11 @@ struct CapsuleSearchField: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .glassEffect(.regular, in: .capsule)
+    }
+
+    private var field: some View {
+        TextField(prompt, text: $text)
+            .textFieldStyle(.plain)
     }
 }
 

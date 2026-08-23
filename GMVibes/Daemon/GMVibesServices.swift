@@ -11,7 +11,7 @@ final class GMVibesServices {
     let fileTrees: FileTreeStore
     let daemon: DaemonConnectionModel
     let catalog: CatalogStore
-    /// Checked-out session per instance (DispatchSource push edge +
+    /// Checked-out session per instance (CHECKOUT_CHANGE push edge +
     /// daemon-side INSTANCE_CURRENT_SESSION resolution).
     let checkout: CheckoutWatcher
 
@@ -21,6 +21,9 @@ final class GMVibesServices {
         daemon = DaemonConnectionModel()
         catalog = CatalogStore()
         checkout = CheckoutWatcher()
+        // The one wiring of the route() → checkout-state edge; both are
+        // app-lifetime singletons, so no re-registration ever happens.
+        daemon.checkoutSink = checkout
     }
 }
 

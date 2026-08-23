@@ -17,12 +17,26 @@ final class WindowNav {
     var railOpen = false
     /// cmd+K action popup.
     var paletteOpen = false
+    /// One-shot prompt deep-link, set by `openSession` and consumed (cleared)
+    /// by the session screen. Lives OUTSIDE Route identity so a repeat
+    /// deep-link into the already-open session — where `go`'s equality guard
+    /// short-circuits and the screen is never recreated — still reaches the
+    /// live screen's selection.
+    var pendingPromptTarget: UUID?
 
     init(initial: Route? = nil) {
         self.route = initial
     }
 
     var canGoBack: Bool { !back.isEmpty }
+
+    /// Session navigation with deep-link delivery: the target rides both the
+    /// route payload (fresh screens seed from it in init) and the one-shot
+    /// pending channel (already-open screens retarget via onChange).
+    func openSession(_ windowID: SessionWindowID) {
+        pendingPromptTarget = windowID.targetPromptUUID
+        go(.session(windowID))
+    }
 
     func go(_ newRoute: Route) {
         guard newRoute != route else { railOpen = false; return }

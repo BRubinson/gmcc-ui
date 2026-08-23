@@ -263,13 +263,11 @@ private struct SessionLeafRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.name).font(.body)
                     HStack(spacing: 6) {
-                        Text(CkfsPathResolver.unslugBranch(session.code))
+                        // The code IS the session's identity (slugged branch,
+                        // forward-only) — rendered verbatim; the raw branch is
+                        // a wire fact only for the checked-out session.
+                        Text(session.code)
                             .font(.caption2.monospaced()).foregroundStyle(.secondary)
-                        // The code is only informative when it differs from the
-                        // un-slugged branch (i.e. the branch contained "/").
-                        if CkfsPathResolver.unslugBranch(session.code) != session.code {
-                            Text(session.code).font(.caption2).foregroundStyle(.tertiary)
-                        }
                     }
                 }
             } icon: {

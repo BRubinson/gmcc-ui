@@ -107,6 +107,9 @@ struct GMVibesWindow: View {
         case .promptMemories(let windowID):
             PromptMemoriesWindow(windowID: windowID)
                 .todoTrailingSlot()
+        case .search(let seed):
+            SearchScreen(seed: seed)
+                .todoTrailingSlot()
         }
     }
 }

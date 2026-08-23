@@ -11,13 +11,6 @@ import GMCCDaemonKit
 /// All functions perform synchronous FileManager probes — callers resolve
 /// off the main actor and cache the results (never call from a View body).
 nonisolated enum CkfsPathResolver {
-    /// Session codes are slugged branch names (`/` → `__`). No branch column
-    /// exists in the db; un-slugging is the display derivation (lossy in
-    /// principle for a branch that itself contains "__").
-    static func unslugBranch(_ sessionCode: String) -> String {
-        sessionCode.replacingOccurrences(of: "__", with: "/")
-    }
-
     /// Slug rule shared with prompt codes (mirrors the historical folder
     /// segment rule; also used by CreatePromptView's code preview).
     ///
@@ -64,68 +57,23 @@ nonisolated enum CkfsPathResolver {
             .appendingPathComponent(session.ckfsRelativeStoragePath, isDirectory: true)
     }
 
-    /// A prompt's folder under a session, or nil when no matching folder
-    /// exists anywhere (a fresh prompt with no filesystem presence — callers
-    /// render an empty state rather than a stranger's folder).
-    ///
-    /// Match rules, in order, probing the LIVE session dir then the archive
-    /// mirror at each step (archive moves prompt folders, leaving the session
-    /// dir live with an emptied prompts/):
-    /// 0. The row's `ckfs_relative_storage_path` — the daemon's own derivation
-    ///    (post-m0002 prompts; `prompts/{seq}_{RAW NAME}`, unslugged). Probed,
-    ///    never trusted blind: the 105 legacy rows carry "" and app-created
-    ///    rows predating the verbatim-folder fix point at a slugged folder.
-    /// 1. `<seq>_<code>` — exact (app-created prompts historically got this).
-    /// 2. `<seq>_<slug(name)>` — imported folders were named from prompt
-    ///    NAMES, while gm-created rows default code to "p{seq}".
-    /// The guessing legs (1-2) are PERMANENT architecture, not a shim — the
-    /// legacy rows get no backfill by daemon decision.
-    /// A loose `<seq>_*` prefix scan is deliberately NOT used: a db prompt at
-    /// a seq that collides with an unrelated legacy folder would resolve to a
-    /// stranger's files (reproduced on the real tree during review).
-    static func promptFolder(
-        ckfsRoot: String,
-        session: SessionStub,
-        seq: Int64,
-        code: String,
-        name: String,
-        storagePath: String = ""
-    ) -> URL? {
-        if !storagePath.isEmpty {
-            let live = URL(fileURLWithPath: ckfsRoot, isDirectory: true)
-                .appendingPathComponent(storagePath, isDirectory: true)
-            if FileManager.default.fileExists(atPath: live.path) { return live }
-            let archived = archiveMirror(relative: storagePath, ckfsRoot: ckfsRoot)
-            if FileManager.default.fileExists(atPath: archived.path) { return archived }
-        }
-        let livePrompts = sessionDir(ckfsRoot: ckfsRoot, session: session)
-            .appendingPathComponent("prompts", isDirectory: true)
-        let archivedPrompts = archiveMirror(
-            relative: session.ckfsRelativeStoragePath, ckfsRoot: ckfsRoot)
-            .appendingPathComponent("prompts", isDirectory: true)
-
-        var candidates = ["\(seq)_\(code)"]
-        let named = "\(seq)_\(slug(name))"
-        if named != candidates[0], slug(name).isEmpty == false {
-            candidates.append(named)
-        }
-        for candidate in candidates {
-            for base in [livePrompts, archivedPrompts] {
-                let url = base.appendingPathComponent(candidate, isDirectory: true)
-                if FileManager.default.fileExists(atPath: url.path) { return url }
-            }
-        }
+    /// A prompt's folder, or nil when it has no filesystem presence. The
+    /// row's `ckfs_relative_storage_path` is the ONLY source (probed live,
+    /// then in the archive mirror — archiving moves prompt folders, leaving
+    /// the session dir live with an emptied prompts/). There is NO folder
+    /// guessing: v8 slugs storage paths at derivation so every new row
+    /// resolves, and the legacy rows (empty path) get no backfill by daemon
+    /// decision — a guessed `<seq>_*` folder can collide with a stranger's
+    /// files (reproduced on the real tree during review), so absence renders
+    /// a non-blocking unavailable state instead.
+    static func promptFolder(ckfsRoot: String, storagePath: String) -> URL? {
+        guard !storagePath.isEmpty else { return nil }
+        let live = URL(fileURLWithPath: ckfsRoot, isDirectory: true)
+            .appendingPathComponent(storagePath, isDirectory: true)
+        if FileManager.default.fileExists(atPath: live.path) { return live }
+        let archived = archiveMirror(relative: storagePath, ckfsRoot: ckfsRoot)
+        if FileManager.default.fileExists(atPath: archived.path) { return archived }
         return nil
-    }
-
-    /// The conventional (not-yet-existing) folder for a prompt — where the
-    /// app creates the folder for a freshly created prompt.
-    static func conventionalPromptFolder(
-        ckfsRoot: String, session: SessionStub, seq: Int64, code: String
-    ) -> URL {
-        sessionDir(ckfsRoot: ckfsRoot, session: session)
-            .appendingPathComponent("prompts", isDirectory: true)
-            .appendingPathComponent("\(seq)_\(code)", isDirectory: true)
     }
 
     /// A resolved memory root plus whether it is the exact directory the
@@ -138,20 +86,23 @@ nonisolated enum CkfsPathResolver {
         /// never describe that directory: only this flag may switch the
         /// explorer from polling to event-driven refresh.
         let isDaemonWatched: Bool
+        /// True when the prompt is legacy and nothing resolved — the memory
+        /// surface renders a non-blocking "unavailable for this legacy
+        /// prompt" state (no storage-path backfill, by daemon decision).
+        let legacyUnavailable: Bool
     }
 
     /// Memory root for a prompt, in priority order:
     /// 1. Deepest common ancestor of the prompt's registered artifact files
-    ///    that exists on disk (the db tells us where its files are before we
-    ///    guess) — handles absolute and ckfs-relative artifact paths.
-    /// 2. The matched prompt folder's memory/ subdirectory.
-    /// Root is nil when neither resolves (fresh prompt, no folder yet).
+    ///    that exists on disk — db-driven (the rows say where the files are),
+    ///    so it is kept for ALL prompts, legacy included: a legacy prompt
+    ///    with registered artifacts shows real memory.
+    /// 2. The storage-path folder's memory/ subdirectory (post-m0002 rows).
+    /// Root is nil when neither resolves; for a legacy row that absence is
+    /// expected and flagged via `legacyUnavailable`.
     static func memoryRoot(
         ckfsRoot: String,
-        session: SessionStub,
-        seq: Int64,
-        code: String,
-        name: String,
+        isLegacy: Bool,
         storagePath: String = "",
         artifacts: [ArtifactRow]
     ) -> ResolvedMemory {
@@ -163,7 +114,8 @@ nonisolated enum CkfsPathResolver {
             ResolvedMemory(
                 root: root,
                 isDaemonWatched: root != nil && watched != nil
-                    && root!.standardizedFileURL.path == watched!.standardizedFileURL.path)
+                    && root!.standardizedFileURL.path == watched!.standardizedFileURL.path,
+                legacyUnavailable: isLegacy && root == nil)
         }
         let parents = artifacts.compactMap { artifact -> URL? in
             let path = artifact.filePath
@@ -182,9 +134,7 @@ nonisolated enum CkfsPathResolver {
             }
             if common.path != "/" { return wrap(common) }
         }
-        let folder = promptFolder(
-            ckfsRoot: ckfsRoot, session: session, seq: seq, code: code, name: name,
-            storagePath: storagePath)
+        let folder = promptFolder(ckfsRoot: ckfsRoot, storagePath: storagePath)
         return wrap(folder.map { $0.appendingPathComponent("memory", isDirectory: true) })
     }
 }

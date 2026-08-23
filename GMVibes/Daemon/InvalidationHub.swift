@@ -61,6 +61,17 @@ final class InvalidationHub {
         }
     }
 
+    /// Mirror of invalidateAllSessions for the one prompt-scoped payload that
+    /// omits prompt_uuid (REVIEW_CHANGE with action "resolve") — delete when
+    /// the daemon adds the field there.
+    func invalidateAllPrompts() {
+        for (domain, conts) in continuations {
+            if case .prompt = domain {
+                conts.values.forEach { $0.yield() }
+            }
+        }
+    }
+
     /// Resync barrier — fired when the connection comes (back) up, so visible
     /// surfaces refetch once instead of trusting a possibly-gapped stream.
     func invalidateAll() {

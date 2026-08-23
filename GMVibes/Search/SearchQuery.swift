@@ -16,11 +16,17 @@ struct SearchQuery: Equatable {
 
     let literal: String
     let tokens: [String]
+    /// Tokens with the session-code slug applied (`/` → `__`) — matching runs
+    /// in the LOSSLESS direction (slug the query, never unslug a code), so a
+    /// user typing `feature/login` finds the session coded `feature__login`.
+    /// Computed once here: per-row derivation would allocate on every match.
+    let sluggedTokens: [String]
     let mode: Mode
 
     init(_ raw: String, mode: Mode = .tokenized) {
         self.literal = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         self.tokens = literal.split(whereSeparator: \.isWhitespace).map(String.init)
+        self.sluggedTokens = tokens.map { $0.replacingOccurrences(of: "/", with: "__") }
         self.mode = mode
     }
 
@@ -34,6 +40,14 @@ struct SearchQuery: Equatable {
     func matchesAny(_ fields: [String]) -> Bool {
         guard isActive else { return false }
         return tokens.contains { token in
+            fields.contains { $0.localizedStandardContains(token) }
+        }
+    }
+
+    // Slugged-token OR-match for session codes (see `sluggedTokens`).
+    func matchesAnySlugged(_ fields: String...) -> Bool {
+        guard isActive else { return false }
+        return sluggedTokens.contains { token in
             fields.contains { $0.localizedStandardContains(token) }
         }
     }

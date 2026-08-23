@@ -16,10 +16,20 @@ struct ArchitecturePane: View {
                 ProgressView().controlSize(.small)
                 Text("Loading architecture…").font(.callout).foregroundStyle(.secondary)
             }
-        case .absent:
-            Label("No architecture recorded for this prompt.", systemImage: "square.stack.3d.up.slash")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+        case .absent(let promptIsLegacy):
+            // Two different absences (daemon-answered, item 6) — both stay
+            // READ-ONLY: every arch write is bot/CLI-side by design.
+            if promptIsLegacy {
+                Label("This prompt predates the db-native architecture system — its record lives in the ckfs artifacts.",
+                      systemImage: "archivebox")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                Label("Not opened yet — run the bot to start architecture.",
+                      systemImage: "square.stack.3d.up.slash")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle")
                 .font(.callout)

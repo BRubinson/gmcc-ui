@@ -1,17 +1,20 @@
 import SwiftUI
 
 // CodeEdit-style file explorer over a prompt's memory/ folder: a recursive
-// navigator on the left, a block-markdown / find-in-page reader on the right. Backed
-// by FileTreeStore.fileTrees (polled), so files an architect agent writes
-// mid-session appear live. The same view is hosted both inline (Memories tab) and in
-// the CMD-click popout window — selection/expansion live in MemoriesExplorerModel.
+// navigator on the left, a block-markdown / find-in-page reader on the right.
+// Backed by FileTreeStore.fileTrees, refreshed event-driven (no timers), so
+// files an architect agent writes mid-session appear live. The same view is
+// hosted both inline (Memories tab) and in the CMD-click popout window —
+// selection/expansion live in MemoriesExplorerModel.
 struct MemoriesExplorer: View {
     let rootURL: URL
     @Bindable var model: MemoriesExplorerModel
-    /// Set (with `isDaemonWatched`) to refresh on PROMPT_MEMORY_CHANGED
-    /// instead of polling. nil/false ⇒ the permanent 1s poll — the 105
-    /// pre-m0002 prompts have no storage path and never receive the event,
-    /// and an artifact-common-ancestor root isn't the watched directory.
+    /// The refresh edge is chosen by `isDaemonWatched`: true ⇒ the root IS
+    /// the daemon-watched storage-path memory/ and PROMPT_MEMORY_CHANGED
+    /// (reliable as of v8) drives it; false ⇒ an artifact-common-ancestor
+    /// root, by definition described by the prompt's artifact rows, so the
+    /// `.prompt` domain (ADD_ARTIFACT et al.) drives it. A nil promptUuid
+    /// refreshes once and stays static.
     var promptUuid: String? = nil
     var isDaemonWatched: Bool = false
 
@@ -51,40 +54,27 @@ struct MemoriesExplorer: View {
         }
         // Keyed on the generation too: PROMPT_MEMORY_CHANGED is ephemeral
         // (id 0, no replay), so changes during a disconnect are lost — the
-        // task restart's immediate refresh below is the resync.
+        // task restart's immediate refresh below is the resync. Event-driven
+        // in BOTH legs, no timer anywhere: v8 re-roots the daemon's
+        // FSEventStream on CONFIG_SET (which retired the 15s backstop poll)
+        // and fixed the SIGSEGV that made the event undeliverable pre-v8
+        // (which retired the 1s poll).
         .task(id: RefreshKey(root: rootURL, generation: daemon.generation,
                              daemonWatched: isDaemonWatched)) {
-            if isDaemonWatched, let promptUuid {
-                // Stream hoisted before the first await (house idiom).
-                let events = daemon.hub.stream(for: .memories(promptUuid.lowercased()))
-                await fs.refreshFileTree(at: rootURL)
-                seedExpansionIfNeeded()
-                for await _ in events {
-                    await fs.refreshFileTree(at: rootURL)
-                    seedExpansionIfNeeded()
-                }
-            } else {
-                while !Task.isCancelled {
-                    await fs.refreshFileTree(at: rootURL)
-                    seedExpansionIfNeeded()
-                    try? await Task.sleep(for: .seconds(1))
-                }
-            }
+            guard let promptUuid else { await refreshOnce(); return }
+            let domain: InvalidationHub.Domain = isDaemonWatched
+                ? .memories(promptUuid.lowercased())
+                : .prompt(promptUuid.lowercased())
+            // Stream hoisted before the first await (house idiom).
+            let events = daemon.hub.stream(for: domain)
+            await refreshOnce()
+            for await _ in events { await refreshOnce() }
         }
-        // Backstop for the event-driven branch: "the root equals the watched
-        // directory" is NOT "the daemon is delivering" — its FSEventStream is
-        // rooted once at boot (CONFIG_SET never re-roots it), stream-create
-        // failures are stderr-only, and the popout window ID snapshots the
-        // flag. A slow safety poll keeps ~97% of the 1s-poll saving while
-        // removing the silent-freeze class entirely.
-        .task(id: rootURL) {
-            guard isDaemonWatched else { return }   // the 1s poll already runs
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(15))
-                await fs.refreshFileTree(at: rootURL)
-                seedExpansionIfNeeded()
-            }
-        }
+    }
+
+    private func refreshOnce() async {
+        await fs.refreshFileTree(at: rootURL)
+        seedExpansionIfNeeded()
     }
 
     @ViewBuilder

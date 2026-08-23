@@ -72,12 +72,7 @@ struct InstanceScreen: View {
     }
 
     private func ensureWatchingAndAutoLoad() {
-        if let row = instance, !row.absoluteFileSystemPath.isEmpty {
-            checkout.ensureWatching(
-                instanceUuid: instanceUuid,
-                repoPath: row.absoluteFileSystemPath
-            )
-        }
+        checkout.ensureWatching(instanceUuid: instanceUuid, generation: daemon.generation)
         // Default-load the active session ONCE; later drift only flags.
         if !didAutoLoad, loadedWindowID == nil, let stub = activeStub {
             loadActive(stub)
@@ -166,7 +161,7 @@ struct InstanceScreen: View {
     private var noActiveMessage: String {
         switch checkout.stateByInstance[instanceUuid] {
         case .some(let state) where state.headState == .branch:
-            let display = state.currentSessionCode.map(CkfsPathResolver.unslugBranch) ?? "?"
+            let display = state.currentBranch ?? state.currentSessionCode ?? "?"
             return "The checked-out branch “\(display)” has no matching session row on this instance."
         case .some(let state) where state.headState == .detached:
             return "This repo is on a detached HEAD — no branch is checked out."

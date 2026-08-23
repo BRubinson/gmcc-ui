@@ -1,11 +1,12 @@
 import Foundation
 import GRDB
 
-// SEARCH — FTS5 full-text search over prompt/clarification/architecture text
-// (the B3 counterpart of KBITE_SEARCH). Six external-content mirrors (m0003),
-// one SELECT arm per requested kind UNIONed, bm25 column-weighted ranking,
-// ranked stubs with prompt lineage — never full content (the excerpt is a
-// bounded FTS5 snippet).
+// SEARCH — FTS5 full-text search over prompt/clarification/architecture/
+// exploration/review text (the B3 counterpart of KBITE_SEARCH). Eleven
+// external-content mirrors (six from m0003, five from m0004), one SELECT arm
+// per requested kind UNIONed, bm25 column-weighted ranking, ranked stubs with
+// prompt lineage — never full content (the excerpt is a bounded FTS5
+// snippet).
 //
 // Scores: SQLite's bm25() returns a NEGATIVE number and the ORDER BY is
 // ascending, so more-negative = better — a kind-bias multiplier < 1 moves a
@@ -145,6 +146,69 @@ extension Store {
                 JOIN prompt p ON p.uuid = a.prompt_uuid
                 JOIN session s ON s.uuid = p.session_uuid
                 WHERE architecture_persistence_change_fts MATCH ?\(scope)
+                """
+        case .explorationSummary:
+            return """
+                SELECT 'exploration_summary' AS kind, es.uuid AS subject_uuid, \(common),
+                       'exploration overview' AS title,
+                       snippet(exploration_summary_fts, -1, '', '', '…', 24) AS excerpt,
+                       bm25(exploration_summary_fts, 5.0) * 0.85 AS score
+                FROM exploration_summary_fts fts
+                JOIN exploration_summary es ON es.id = fts.rowid
+                JOIN prompt p ON p.uuid = es.prompt_uuid
+                JOIN session s ON s.uuid = p.session_uuid
+                WHERE exploration_summary_fts MATCH ?\(scope)
+                """
+        case .explorationKeyFile:
+            return """
+                SELECT 'exploration_key_file' AS kind, kf.uuid AS subject_uuid, \(common),
+                       kf.file_path AS title,
+                       snippet(exploration_key_file_fts, -1, '', '', '…', 24) AS excerpt,
+                       bm25(exploration_key_file_fts, 5.0) * 0.7 AS score
+                FROM exploration_key_file_fts fts
+                JOIN exploration_key_file kf ON kf.id = fts.rowid
+                JOIN exploration_summary es ON es.uuid = kf.exploration_summary_uuid
+                JOIN prompt p ON p.uuid = es.prompt_uuid
+                JOIN session s ON s.uuid = p.session_uuid
+                WHERE exploration_key_file_fts MATCH ?\(scope)
+                """
+        case .explorationFinding:
+            return """
+                SELECT 'exploration_finding' AS kind, ef.uuid AS subject_uuid, \(common),
+                       ef.title AS title,
+                       snippet(exploration_finding_fts, -1, '', '', '…', 24) AS excerpt,
+                       bm25(exploration_finding_fts, 6.0, 4.0) * 0.7 AS score
+                FROM exploration_finding_fts fts
+                JOIN exploration_finding ef ON ef.id = fts.rowid
+                JOIN exploration_summary es ON es.uuid = ef.exploration_summary_uuid
+                JOIN prompt p ON p.uuid = es.prompt_uuid
+                JOIN session s ON s.uuid = p.session_uuid
+                WHERE exploration_finding_fts MATCH ?\(scope)
+                """
+        case .reviewSummary:
+            return """
+                SELECT 'review_summary' AS kind, rs.uuid AS subject_uuid, \(common),
+                       'review overview' AS title,
+                       snippet(review_summary_fts, -1, '', '', '…', 24) AS excerpt,
+                       bm25(review_summary_fts, 5.0) * 0.85 AS score
+                FROM review_summary_fts fts
+                JOIN review_summary rs ON rs.id = fts.rowid
+                JOIN prompt p ON p.uuid = rs.prompt_uuid
+                JOIN session s ON s.uuid = p.session_uuid
+                WHERE review_summary_fts MATCH ?\(scope)
+                """
+        case .reviewFinding:
+            return """
+                SELECT 'review_finding' AS kind, rf.uuid AS subject_uuid, \(common),
+                       rf.title AS title,
+                       snippet(review_finding_fts, -1, '', '', '…', 24) AS excerpt,
+                       bm25(review_finding_fts, 6.0, 4.0, 1.0) * 0.7 AS score
+                FROM review_finding_fts fts
+                JOIN review_finding rf ON rf.id = fts.rowid
+                JOIN review_summary rs ON rs.uuid = rf.review_summary_uuid
+                JOIN prompt p ON p.uuid = rs.prompt_uuid
+                JOIN session s ON s.uuid = p.session_uuid
+                WHERE review_finding_fts MATCH ?\(scope)
                 """
         }
     }

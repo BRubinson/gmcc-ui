@@ -40,11 +40,28 @@ public enum StoreError: Error, Sendable {
                 code: .invalidTransition,
                 message: "illegal prompt transition \(from.rawValue) → \(to.rawValue)\(suffix)")
         case .summaryAbsent(let entity, let uuid, let legacy):
+            // The open-verb hint is entity-derived; the message shape for the
+            // clarify/arch entities stays byte-identical to its v7 wording.
+            let verb: String
+            switch entity {
+            case "clarification": verb = "gm clarify open / gm arch open"
+            case "architecture": verb = "gm clarify open / gm arch open"
+            case "exploration": verb = "gm explore open"
+            case "review": verb = "gm review open"
+            default: verb = "gm clarify open / gm arch open"
+            }
+            // Pre-m0004 prompts can hold their real explore/review report as
+            // an on-disk file even though they are not legacy — the mandatory
+            // migrate pass moves those into rows; steer before "open one"
+            // buries a historical report under a fresh empty summary.
+            let midEraHint = (entity == "exploration" || entity == "review")
+                ? "; if this prompt predates m0004 and has an on-disk report file (gm artifact list --prompt-uuid \(uuid)), run the migrate pass instead"
+                : ""
             return ErrorPayload(
                 code: .summaryAbsent,
                 message: legacy
                     ? "prompt \(uuid) predates the db-native lifecycle and has no \(entity) — read the ckfs artifact instead (gm artifact list --prompt-uuid \(uuid)); never fabricate backing rows"
-                    : "prompt \(uuid) has no \(entity) yet — open one (gm clarify open / gm arch open --prompt-uuid \(uuid))",
+                    : "prompt \(uuid) has no \(entity) yet — open one (\(verb) --prompt-uuid \(uuid))\(midEraHint)",
                 promptIsLegacy: legacy)
         case .contentLocked(let status):
             return ErrorPayload(
@@ -232,6 +249,15 @@ public final class Store: @unchecked Sendable {
         while let last = slug.last, last == "_" || last == "." { slug.removeLast() }
         return slug.isEmpty ? "prompt" : slug
     }
+
+    /// Shared cap for narrative report text (exploration/review overview and
+    /// finding bodies) — the same 2 MB budget as architecture change_code.
+    static let maxNarrativeBytes = 2 * 1024 * 1024
+
+    /// The consumption threshold of the 0–999 finding-rating scale: GETs
+    /// return full rows under it (plus every unranked row) and stubs at or
+    /// above it.
+    static let findingReadThreshold = 100
 
     /// daemon_event.payload is documented as JSON — always build it with a
     /// real serializer so embedded quotes/backslashes in values (file paths!)

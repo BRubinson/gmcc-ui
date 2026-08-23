@@ -46,7 +46,14 @@ final class SessionStore {
         do {
             let response = try await service.getSession(sessionUuid: sessionUuid)
             if session != response.session { session = response.session }
-            let sorted = response.prompts.sorted { $0.seq > $1.seq }
+            // Prompts come from PROMPT_LIST with_reports — its enrichment
+            // block precomputes every prompt's clarify/arch gate in one round
+            // trip (SESSION_GET stays the sole source of the row + change
+            // summaries). SEQUENTIAL after it, never concurrent: the daemon's
+            // single serial queue has no fairness.
+            let enriched = try await service.listPrompts(
+                sessionUuid: sessionUuid, withReports: true)
+            let sorted = enriched.sorted { $0.seq > $1.seq }
             if prompts != sorted { prompts = sorted }
             if changeSummary != response.changeSummary { changeSummary = response.changeSummary }
             if promptChanges != response.promptChanges { promptChanges = response.promptChanges }

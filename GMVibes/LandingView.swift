@@ -46,7 +46,8 @@ struct LandingView: View {
         // changes advance session.updated_at WITHOUT bumping version, so
         // without this subscriber the strip would freeze until an unrelated
         // topology event. CheckoutWatcher is retargeted after each catalog
-        // refresh so its DispatchSources track the instance set.
+        // refresh so its watch set tracks the instance set (the push edge
+        // itself is the daemon's CHECKOUT_CHANGE broadcast).
         .task(id: daemon.generation) {
             let topology = daemon.hub.stream(for: .topology)
             await refreshAll()
@@ -74,11 +75,8 @@ struct LandingView: View {
         await catalog.refresh()
         recents.refresh(catalog: catalog)
         checkout.watch(
-            instances: catalog.instancesByUuid.values.compactMap { row in
-                row.absoluteFileSystemPath.isEmpty
-                    ? nil
-                    : (uuid: row.uuid, repoPath: row.absoluteFileSystemPath)
-            }
+            instanceUuids: Set(catalog.instancesByUuid.keys),
+            generation: daemon.generation
         )
     }
 

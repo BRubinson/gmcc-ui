@@ -90,6 +90,30 @@ final class CatalogStore {
         instancesByUuid[uuid]
     }
 
+    func session(uuid: String) -> SessionStub? {
+        sessionsByUuid[uuid]
+    }
+
+    /// Joins a SEARCH hit's sessionUuid to its owning instance so the hit can
+    /// address `Route.session` — SearchHit carries sessionUuid/sessionCode but
+    /// no instanceUuid, and SessionWindowID requires one. nil ⇒ the hit is not
+    /// navigable (session missing from the snapshot, or a malformed uuid); the
+    /// caller renders an inert row rather than minting a fabricated identity.
+    func sessionWindowID(
+        forSessionUuid sessionUuid: String,
+        targetPromptUuid: String? = nil
+    ) -> SessionWindowID? {
+        guard let stub = session(uuid: sessionUuid),
+              let sessionUUID = UUID(uuidString: stub.uuid),
+              let instanceUUID = UUID(uuidString: stub.instanceUuid) else { return nil }
+        return SessionWindowID(
+            sessionUUID: sessionUUID,
+            instanceUUID: instanceUUID,
+            sessionName: stub.name,
+            targetPromptUUID: targetPromptUuid.flatMap(UUID.init(uuidString:))
+        )
+    }
+
 }
 
 // MARK: - Search matching over kit rows
@@ -108,6 +132,6 @@ nonisolated extension InstanceRow {
 
 nonisolated extension SessionStub {
     func matches(_ q: SearchQuery) -> Bool {
-        q.matchesAny(name, code, CkfsPathResolver.unslugBranch(code))
+        q.matchesAny(name, code) || q.matchesAnySlugged(code)
     }
 }

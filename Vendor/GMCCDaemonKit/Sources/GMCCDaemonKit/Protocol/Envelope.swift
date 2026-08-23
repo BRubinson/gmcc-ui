@@ -7,7 +7,7 @@ import Foundation
 /// rejected — the daemon stays up (an old pinned-Kit GMVibes must never be
 /// able to kill-loop a fresh daemon).
 public enum GMCCWireProtocol {
-    public static let version = 8
+    public static let version = 9
 }
 
 /// Discriminator for every NDJSON message on the socket. One case per spec
@@ -74,6 +74,22 @@ public enum MessageType: String, Codable, Hashable, CaseIterable, Sendable {
     case archApprove = "ARCH_APPROVE"
     case archRevise = "ARCH_REVISE"
     case archGet = "ARCH_GET"
+    // Exploration report machine (v9)
+    case exploreOpen = "EXPLORE_OPEN"
+    case exploreKeyFileAdd = "EXPLORE_KEY_FILE_ADD"
+    case exploreFindingAdd = "EXPLORE_FINDING_ADD"
+    case exploreRank = "EXPLORE_RANK"
+    case exploreComplete = "EXPLORE_COMPLETE"
+    case exploreReopen = "EXPLORE_REOPEN"
+    case exploreGet = "EXPLORE_GET"
+    // Review report machine (v9)
+    case reviewOpen = "REVIEW_OPEN"
+    case reviewFindingAdd = "REVIEW_FINDING_ADD"
+    case reviewRank = "REVIEW_RANK"
+    case reviewResolve = "REVIEW_RESOLVE"
+    case reviewComplete = "REVIEW_COMPLETE"
+    case reviewReopen = "REVIEW_REOPEN"
+    case reviewGet = "REVIEW_GET"
     // Git-state resolution (v7)
     case sessionResolve = "SESSION_RESOLVE"
     case instanceCurrentSession = "INSTANCE_CURRENT_SESSION"
@@ -186,10 +202,13 @@ public enum ErrorCode: String, Codable, Hashable, CaseIterable, Sendable {
     case versionConflict = "VERSION_CONFLICT"
     case invalidTransition = "INVALID_TRANSITION"
     case contentLocked = "CONTENT_LOCKED"
-    /// The prompt exists but has no clarification/architecture summary. The
-    /// payload's `promptIsLegacy` says which absence: true ⇒ pre-m0002 prompt,
-    /// read the ckfs artifact; false ⇒ not opened yet. Plain NOT_FOUND now
-    /// means only that the uuid itself is unknown.
+    /// The prompt exists but has no clarification/architecture/exploration/
+    /// review summary. The payload's `promptIsLegacy` says which absence:
+    /// true ⇒ pre-m0002 prompt, read the ckfs artifact; false ⇒ not opened
+    /// yet (for exploration/review a pre-m0004 prompt may instead have an
+    /// on-disk explore.md/review.md — the mandatory migrate pass moves those
+    /// into rows). Plain NOT_FOUND now means only that the uuid itself is
+    /// unknown.
     case summaryAbsent = "SUMMARY_ABSENT"
 }
 

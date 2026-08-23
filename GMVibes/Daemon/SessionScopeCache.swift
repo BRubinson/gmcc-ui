@@ -97,7 +97,6 @@ final class SessionScope {
     /// stops; panes own their draft boxes and flushed on their own teardown.
     func retire() {
         daemon?.unregisterSession(sessionUuid, ifOwnedBy: ObjectIdentifier(self))
-        for store in phaseStores.values { store.unregister() }
     }
 
     /// Memoized per prompt uuid so concurrent panes thread one version. The

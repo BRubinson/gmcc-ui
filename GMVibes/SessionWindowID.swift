@@ -12,6 +12,17 @@ struct SessionWindowID: Codable, Hashable, Identifiable {
     let sessionUUID: UUID
     let instanceUUID: UUID
     let sessionName: String
+    /// Deep-link target: a SEARCH hit addresses a PROMPT, not just a session.
+    /// `var` + Optional ⇒ the memberwise init defaults it to nil and synthesized
+    /// Codable uses decodeIfPresent (the PromptMemoriesWindowID contract).
+    ///
+    /// Part of Hashable: a hit targeting a DIFFERENT prompt of the open
+    /// session changes route identity and re-ids the window content (cheap
+    /// via SessionScopeCache's grace list). A repeat hit with the SAME target
+    /// is route-equal — `WindowNav.go` short-circuits — so `openSession` also
+    /// delivers the target on the one-shot `pendingPromptTarget` channel,
+    /// which the live screen consumes.
+    var targetPromptUUID: UUID?
 
     var id: UUID { sessionUUID }
 }

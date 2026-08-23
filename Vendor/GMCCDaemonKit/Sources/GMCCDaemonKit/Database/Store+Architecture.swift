@@ -295,7 +295,7 @@ extension Store {
     /// via prompt → session → instance (the add payloads carry no context
     /// blocks). Empty when the chain is broken — the normalizer then only
     /// applies its lexical rules.
-    private func instanceRoot(_ db: Database, promptUuid: String) throws -> String {
+    func instanceRoot(_ db: Database, promptUuid: String) throws -> String {
         try String.fetchOne(db, sql: """
             SELECT i.absolute_file_system_path
             FROM prompt p

@@ -263,10 +263,83 @@ public struct PromptStub: Codable, Hashable, Sendable {
 public struct PromptReportsStub: Codable, Hashable, Sendable {
     public let clarification: ClarificationReportStub?
     public let architecture: ArchitectureReportStub?
+    public let exploration: ExplorationReportStub?
+    public let review: ReviewReportStub?
 
-    public init(clarification: ClarificationReportStub?, architecture: ArchitectureReportStub?) {
+    public init(
+        clarification: ClarificationReportStub?,
+        architecture: ArchitectureReportStub?,
+        exploration: ExplorationReportStub? = nil,
+        review: ReviewReportStub? = nil
+    ) {
         self.clarification = clarification
         self.architecture = architecture
+        self.exploration = exploration
+        self.review = review
+    }
+}
+
+/// Exploration summary stub for the enrichment block.
+public struct ExplorationReportStub: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let version: Int64
+    public let status: String
+    public let keyFileCount: Int
+    public let findingCount: Int
+    /// Findings under the read threshold (rating < 100).
+    public let sub100FindingCount: Int
+    /// Resume signal: >0 means the exploration stalled before ranking.
+    public let unrankedFindingCount: Int
+
+    public init(
+        summaryUuid: String,
+        version: Int64,
+        status: String,
+        keyFileCount: Int,
+        findingCount: Int,
+        sub100FindingCount: Int,
+        unrankedFindingCount: Int
+    ) {
+        self.summaryUuid = summaryUuid
+        self.version = version
+        self.status = status
+        self.keyFileCount = keyFileCount
+        self.findingCount = findingCount
+        self.sub100FindingCount = sub100FindingCount
+        self.unrankedFindingCount = unrankedFindingCount
+    }
+}
+
+/// Review summary stub for the enrichment block.
+public struct ReviewReportStub: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let version: Int64
+    public let status: String
+    public let verdict: String?
+    public let findingCount: Int
+    public let sub100FindingCount: Int
+    public let unrankedFindingCount: Int
+    /// Resume signal for the fix loop: unresolved findings.
+    public let openFindingCount: Int
+
+    public init(
+        summaryUuid: String,
+        version: Int64,
+        status: String,
+        verdict: String?,
+        findingCount: Int,
+        sub100FindingCount: Int,
+        unrankedFindingCount: Int,
+        openFindingCount: Int
+    ) {
+        self.summaryUuid = summaryUuid
+        self.version = version
+        self.status = status
+        self.verdict = verdict
+        self.findingCount = findingCount
+        self.sub100FindingCount = sub100FindingCount
+        self.unrankedFindingCount = unrankedFindingCount
+        self.openFindingCount = openFindingCount
     }
 }
 
@@ -822,5 +895,199 @@ public struct UnplannedChangeRow: Codable, Hashable, Sendable {
         self.changeCount = changeCount
         self.firstChangedAt = firstChangedAt
         self.lastChangedAt = lastChangedAt
+    }
+}
+
+// MARK: - Exploration (v9)
+
+public struct ExplorationSummaryRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let version: Int64
+    public let promptUuid: String
+    public let status: String
+    public let overview: String
+    public let createdAt: String
+    public let updatedAt: String
+
+    public var explorationStatus: ExplorationStatus? { ExplorationStatus(rawValue: status) }
+
+    public init(
+        uuid: String,
+        version: Int64,
+        promptUuid: String,
+        status: String,
+        overview: String,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.uuid = uuid
+        self.version = version
+        self.promptUuid = promptUuid
+        self.status = status
+        self.overview = overview
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct ExplorationKeyFileRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let version: Int64
+    public let explorationSummaryUuid: String
+    public let filePath: String
+
+    public init(uuid: String, version: Int64, explorationSummaryUuid: String, filePath: String) {
+        self.uuid = uuid
+        self.version = version
+        self.explorationSummaryUuid = explorationSummaryUuid
+        self.filePath = filePath
+    }
+}
+
+public struct ExplorationFindingRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let version: Int64
+    public let explorationSummaryUuid: String
+    public let kind: String
+    public let title: String
+    public let body: String
+    public let agentName: String
+    /// nil = unranked (work-in-progress; blocks COMPLETE).
+    public let findingRating: Int?
+
+    public init(
+        uuid: String,
+        version: Int64,
+        explorationSummaryUuid: String,
+        kind: String,
+        title: String,
+        body: String,
+        agentName: String,
+        findingRating: Int?
+    ) {
+        self.uuid = uuid
+        self.version = version
+        self.explorationSummaryUuid = explorationSummaryUuid
+        self.kind = kind
+        self.title = title
+        self.body = body
+        self.agentName = agentName
+        self.findingRating = findingRating
+    }
+}
+
+/// Lightweight finding shape for the at-or-above-threshold partition of
+/// EXPLORE_GET (stubs-not-content discipline: no body).
+public struct ExplorationFindingStub: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let kind: String
+    public let title: String
+    public let findingRating: Int?
+    public let agentName: String
+
+    public init(uuid: String, kind: String, title: String, findingRating: Int?, agentName: String) {
+        self.uuid = uuid
+        self.kind = kind
+        self.title = title
+        self.findingRating = findingRating
+        self.agentName = agentName
+    }
+}
+
+// MARK: - Review (v9)
+
+public struct ReviewSummaryRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let version: Int64
+    public let promptUuid: String
+    public let status: String
+    public let verdict: String?
+    public let overview: String
+    public let createdAt: String
+    public let updatedAt: String
+
+    public var reviewStatus: ReviewSummaryStatus? { ReviewSummaryStatus(rawValue: status) }
+
+    public init(
+        uuid: String,
+        version: Int64,
+        promptUuid: String,
+        status: String,
+        verdict: String?,
+        overview: String,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.uuid = uuid
+        self.version = version
+        self.promptUuid = promptUuid
+        self.status = status
+        self.verdict = verdict
+        self.overview = overview
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct ReviewFindingRow: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let version: Int64
+    public let reviewSummaryUuid: String
+    public let kind: String
+    public let title: String
+    public let body: String
+    public let filePath: String?
+    public let lineStart: Int?
+    public let lineEnd: Int?
+    public let agentName: String
+    public let findingRating: Int?
+    public let status: String
+
+    public init(
+        uuid: String,
+        version: Int64,
+        reviewSummaryUuid: String,
+        kind: String,
+        title: String,
+        body: String,
+        filePath: String?,
+        lineStart: Int?,
+        lineEnd: Int?,
+        agentName: String,
+        findingRating: Int?,
+        status: String
+    ) {
+        self.uuid = uuid
+        self.version = version
+        self.reviewSummaryUuid = reviewSummaryUuid
+        self.kind = kind
+        self.title = title
+        self.body = body
+        self.filePath = filePath
+        self.lineStart = lineStart
+        self.lineEnd = lineEnd
+        self.agentName = agentName
+        self.findingRating = findingRating
+        self.status = status
+    }
+}
+
+/// Review counterpart of ExplorationFindingStub; carries `status` so the fix
+/// loop sees resolution state even for stubbed findings.
+public struct ReviewFindingStub: Codable, Hashable, Sendable {
+    public let uuid: String
+    public let kind: String
+    public let title: String
+    public let findingRating: Int?
+    public let agentName: String
+    public let status: String
+
+    public init(uuid: String, kind: String, title: String, findingRating: Int?, agentName: String, status: String) {
+        self.uuid = uuid
+        self.kind = kind
+        self.title = title
+        self.findingRating = findingRating
+        self.agentName = agentName
+        self.status = status
     }
 }

@@ -51,7 +51,7 @@ struct InactiveSessionsSheet: View {
                             sessionName: stub.name
                         ),
                         sessionName: stub.name,
-                        branch: CkfsPathResolver.unslugBranch(stub.code),
+                        branch: stub.code,
                         projectName: project.name,
                         instanceName: instance.name
                     ))

@@ -23,16 +23,39 @@ struct PromptLifecycleBar: View {
 
     private var status: PromptStatus? { PromptStatus(rawValue: stub.status) }
 
+    /// Informational ONLY — never consulted by `gate(to:)` (the daemon does
+    /// not couple prompt transitions to explore/review). Precedence mirrors
+    /// the gate tiers: the LIVE phase store first (it refreshes on every
+    /// EXPLORATION_CHANGE/REVIEW_CHANGE), then PROMPT_LIST's with_reports
+    /// precomputation. The live tier is load-bearing, not a nicety: report
+    /// writes don't emit a session event, so `stub.reports` does not re-list
+    /// on a report change and would show stale counts for the pane's life.
+    private var reportBadges: [ReportBadgeItem] {
+        var items: [ReportBadgeItem] = []
+        if case .loaded(let response) = phases.exploration {
+            items += ReportBadgeItem.exploration(response)
+        } else if let reportStub = stub.reports?.exploration {
+            items += ReportBadgeItem.exploration(reportStub)
+        }
+        if case .loaded(let response) = phases.review {
+            items += ReportBadgeItem.review(response)
+        } else if let reportStub = stub.reports?.review {
+            items += ReportBadgeItem.review(reportStub)
+        }
+        return items
+    }
+
     enum Gate {
         case open
         case blocked(reason: String, fix: String)
-        /// The client can't adjudicate — phase state unavailable (loading /
-        /// failed), or the summary is ABSENT: absence is ambiguous between
-        /// "legacy prompt, daemon bypasses the gate" and "never opened"
-        /// (the daemon's legacy rule is a created_at epoch the wire doesn't
-        /// carry — a client-side proxy would strand users the day the
-        /// storage-path backfill lands). Offer the button; the daemon rules
-        /// and invalidTransition(reason:) surfaces the real message.
+        /// The client can't adjudicate: neither the live phase store nor the
+        /// PROMPT_LIST with_reports precomputation has an answer (as of v8
+        /// absence itself is self-describing — is_legacy travels on the stub
+        /// and SUMMARY_ABSENT carries prompt_is_legacy — so this is the rare
+        /// case, not the common one; it still occurs transiently on a `.idle`
+        /// first render whose stub was listed without reports). Offer the
+        /// button; the daemon rules and invalidTransition(reason:) surfaces
+        /// the real message.
         case unknown
     }
 
@@ -40,6 +63,13 @@ struct PromptLifecycleBar: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 rail
+                // Informational — on a narrow window the badges drop out
+                // entirely rather than clipping the rail or the transition
+                // buttons (the phaseCard headers still carry the counts).
+                ViewThatFits(in: .horizontal) {
+                    ReportBadgeCluster(items: reportBadges)
+                    Color.clear.frame(width: 0, height: 0)
+                }
                 Spacer()
                 if inFlight {
                     ProgressView().controlSize(.small)
@@ -167,8 +197,13 @@ struct PromptLifecycleBar: View {
     /// needs the clarification summary complete; architecting→implementing
     /// needs the architecture approved. Everything else is edge-only. There
     /// is deliberately NO legacy exemption on a loaded-but-wrong-status
-    /// summary — the daemon has none either (bypassWhenAbsent only) — and
-    /// `.absent` degrades to `.unknown`, never `.blocked` (see Gate).
+    /// summary — the daemon has none either (bypassWhenAbsent only).
+    ///
+    /// Precedence (three-tier): the LIVE phase store when it has an answer
+    /// (.loaded/.absent — it reflects a bot's just-finalized summary), then
+    /// the PROMPT_LIST with_reports precomputation (.idle/.failed — the rail
+    /// adjudicates before, or entirely without, the pane's fetch), then
+    /// .unknown only when reports were never requested.
     private func gate(to next: PromptStatus) -> Gate {
         switch (status, next) {
         case (.clarifying, .architecting):
@@ -178,8 +213,16 @@ struct PromptLifecycleBar: View {
                 return .blocked(
                     reason: "Clarification is \(phases.clarificationStatus?.rawValue ?? "incomplete")",
                     fix: "finalize it first (gm clarify finalize)")
-            case .absent, .idle, .failed:
-                return .unknown
+            case .absent(let promptIsLegacy):
+                // SUMMARY_ABSENT is self-describing in v8: the daemon
+                // bypasses this gate for legacy prompts; a non-legacy absence
+                // is a real block whose fix is the bot (clarify writes stay
+                // bot/CLI-side).
+                return promptIsLegacy ? .open : .blocked(
+                    reason: "No clarification recorded",
+                    fix: "run the bot to open clarification")
+            case .idle, .failed:
+                return precomputedClarificationGate()
             }
         case (.architecting, .implementing):
             switch phases.architecture {
@@ -188,12 +231,46 @@ struct PromptLifecycleBar: View {
                 return .blocked(
                     reason: "Architecture is \(phases.architectureStatus?.rawValue ?? "incomplete")",
                     fix: "approve it first (gm arch approve)")
-            case .absent, .idle, .failed:
-                return .unknown
+            case .absent(let promptIsLegacy):
+                return promptIsLegacy ? .open : .blocked(
+                    reason: "No architecture recorded",
+                    fix: "run the bot to open architecture")
+            case .idle, .failed:
+                return precomputedArchitectureGate()
             }
         default:
             return .open
         }
+    }
+
+    /// The with_reports fallback tiers. `stub.reports == nil` means the
+    /// listing was fetched without reports (or an older daemon) — exactly
+    /// today's `.unknown`. A nil member with a report block present is the
+    /// SUMMARY_ABSENT discrimination surfaced in the listing.
+    private func precomputedClarificationGate() -> Gate {
+        guard let reports = stub.reports else { return .unknown }
+        guard let clarification = reports.clarification else {
+            return stub.isLegacy ? .open : .blocked(
+                reason: "No clarification recorded",
+                fix: "run the bot to open clarification")
+        }
+        if ClarificationStatus(rawValue: clarification.status) == .complete { return .open }
+        return .blocked(
+            reason: "Clarification is \(clarification.status)",
+            fix: "finalize it first (gm clarify finalize)")
+    }
+
+    private func precomputedArchitectureGate() -> Gate {
+        guard let reports = stub.reports else { return .unknown }
+        guard let architecture = reports.architecture else {
+            return stub.isLegacy ? .open : .blocked(
+                reason: "No architecture recorded",
+                fix: "run the bot to open architecture")
+        }
+        if ArchitectureStatus(rawValue: architecture.status) == .approved { return .open }
+        return .blocked(
+            reason: "Architecture is \(architecture.status)",
+            fix: "approve it first (gm arch approve)")
     }
 
     private func buttonTitle(for next: PromptStatus) -> String {
@@ -238,7 +315,7 @@ struct PromptLifecycleBar: View {
                 // resync both the prompt and the gates.
                 transitionError = error.userMessage
                 await store.refreshPrompt(uuid: stub.uuid)
-                await phases.refresh(daemon: daemon)
+                await phases.refresh()
             case .versionConflict:
                 transitionError = "The prompt changed elsewhere — reloaded; try again."
                 await store.refreshPrompt(uuid: stub.uuid)

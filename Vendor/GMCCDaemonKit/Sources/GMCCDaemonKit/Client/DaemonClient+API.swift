@@ -188,6 +188,70 @@ extension DaemonClient {
     }
 }
 
+// MARK: - Exploration (v9)
+
+extension DaemonClient {
+    public func exploreOpen(_ req: ExploreOpenRequest) throws -> ExploreSummaryResponse {
+        try request(type: .exploreOpen, payload: req, responseType: ExploreSummaryResponse.self)
+    }
+
+    public func exploreKeyFileAdd(_ req: ExploreKeyFileAddRequest) throws -> ExploreKeyFileAddResponse {
+        try request(type: .exploreKeyFileAdd, payload: req, responseType: ExploreKeyFileAddResponse.self)
+    }
+
+    public func exploreFindingAdd(_ req: ExploreFindingAddRequest) throws -> ExploreFindingRowResponse {
+        try request(type: .exploreFindingAdd, payload: req, responseType: ExploreFindingRowResponse.self)
+    }
+
+    public func exploreRank(_ req: ExploreRankRequest) throws -> ExploreRankResponse {
+        try request(type: .exploreRank, payload: req, responseType: ExploreRankResponse.self)
+    }
+
+    public func exploreComplete(_ req: ExploreCompleteRequest) throws -> ExploreSummaryResponse {
+        try request(type: .exploreComplete, payload: req, responseType: ExploreSummaryResponse.self)
+    }
+
+    public func exploreReopen(_ req: ExploreReopenRequest) throws -> ExploreSummaryResponse {
+        try request(type: .exploreReopen, payload: req, responseType: ExploreSummaryResponse.self)
+    }
+
+    public func exploreGet(_ req: ExploreGetRequest) throws -> ExploreGetResponse {
+        try request(type: .exploreGet, payload: req, responseType: ExploreGetResponse.self)
+    }
+}
+
+// MARK: - Review (v9)
+
+extension DaemonClient {
+    public func reviewOpen(_ req: ReviewOpenRequest) throws -> ReviewSummaryResponse {
+        try request(type: .reviewOpen, payload: req, responseType: ReviewSummaryResponse.self)
+    }
+
+    public func reviewFindingAdd(_ req: ReviewFindingAddRequest) throws -> ReviewFindingRowResponse {
+        try request(type: .reviewFindingAdd, payload: req, responseType: ReviewFindingRowResponse.self)
+    }
+
+    public func reviewRank(_ req: ReviewRankRequest) throws -> ReviewRankResponse {
+        try request(type: .reviewRank, payload: req, responseType: ReviewRankResponse.self)
+    }
+
+    public func reviewResolve(_ req: ReviewResolveRequest) throws -> ReviewFindingRowResponse {
+        try request(type: .reviewResolve, payload: req, responseType: ReviewFindingRowResponse.self)
+    }
+
+    public func reviewComplete(_ req: ReviewCompleteRequest) throws -> ReviewSummaryResponse {
+        try request(type: .reviewComplete, payload: req, responseType: ReviewSummaryResponse.self)
+    }
+
+    public func reviewReopen(_ req: ReviewReopenRequest) throws -> ReviewSummaryResponse {
+        try request(type: .reviewReopen, payload: req, responseType: ReviewSummaryResponse.self)
+    }
+
+    public func reviewGet(_ req: ReviewGetRequest) throws -> ReviewGetResponse {
+        try request(type: .reviewGet, payload: req, responseType: ReviewGetResponse.self)
+    }
+}
+
 // MARK: - Architecture (v7)
 
 extension DaemonClient {

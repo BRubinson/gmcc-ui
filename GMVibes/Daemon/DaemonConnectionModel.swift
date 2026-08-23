@@ -34,6 +34,12 @@ final class DaemonConnectionModel {
 
     let hub = InvalidationHub()
 
+    /// The route() → checkout-state edge. CHECKOUT_CHANGE's payload carries
+    /// everything the watcher publishes, so the arm applies state directly
+    /// instead of waking a Void-domain subscriber into a round trip. Weak —
+    /// the sink is an app-lifetime singleton, wired once by GMVibesServices.
+    weak var checkoutSink: CheckoutEventSink?
+
     /// Live session scopes register their prompt uuids so prompt-subject
     /// events route to the owning session only; unknown subjects fan out.
     /// Owner-token guarded: a retired scope's late unregister must not kill
@@ -88,33 +94,6 @@ final class DaemonConnectionModel {
 
     private func owningSession(ofPrompt uuid: String) -> String? {
         sessionPrompts.first { $0.value.prompts.contains(uuid) }?.key
-    }
-
-    // MARK: - Summary routing registry (v7)
-
-    /// CLARIFICATION_CHANGE / ARCHITECTURE_CHANGE subjects are SUMMARY uuids;
-    /// only open/summarize/finalize payloads repeat the prompt uuid. Phase
-    /// stores register the summary→prompt edge when their fetch reveals it —
-    /// the mapping lives where it is known. Same owner-token discipline as
-    /// `sessionPrompts`. (Daemon-goal write-back: prompt_uuid on EVERY phase
-    /// payload would delete this registry.)
-    private var summaryPrompts: [String: (owner: ObjectIdentifier, prompt: String)] = [:]
-
-    func registerSummaries(_ summaryUuids: Set<String>, forPrompt promptUuid: String, owner: ObjectIdentifier) {
-        for uuid in summaryUuids {
-            let current = summaryPrompts[uuid]
-            if current?.owner != owner || current?.prompt != promptUuid {
-                summaryPrompts[uuid] = (owner, promptUuid)
-            }
-        }
-    }
-
-    func unregisterSummaries(ifOwnedBy owner: ObjectIdentifier) {
-        summaryPrompts = summaryPrompts.filter { $0.value.owner != owner }
-    }
-
-    private func owningPrompt(ofSummary uuid: String) -> String? {
-        summaryPrompts[uuid]?.prompt
     }
 
     // MARK: - Supervising loop
@@ -235,7 +214,7 @@ final class DaemonConnectionModel {
         if let stored = (defaults.object(forKey: Self.cursorKey) as? NSNumber)?.int64Value, stored > 0 {
             lastPersistedCursor = max(lastPersistedCursor, stored)
             let stamp = defaults.object(forKey: Self.cursorStampKey) as? Date ?? .distantPast
-            let logHead = Int64(status?.tableCounts.first(where: { $0.name == "daemon_event" })?.count ?? 0)
+            let logHead = status?.lastEventId ?? 0
             if Date().timeIntervalSince(stamp) < Self.cursorMaxAge, stored <= logHead {
                 sinceId = stored
             }
@@ -302,6 +281,17 @@ final class DaemonConnectionModel {
         return try? WireCodec.decoder.decode(EventPayloadUuids.self, from: data)
     }
 
+    /// CHECKOUT_CHANGE is ephemeral (id 0, never a replay cursor) and its
+    /// payload is complete: the daemon's HEAD watcher already resolved the
+    /// branch and session code, so the arm publishes state rather than
+    /// scheduling a lookup.
+    private struct CheckoutChangePayload: Decodable {
+        let instanceUuid: String
+        let headState: String
+        let currentBranch: String?
+        let currentSessionCode: String?
+    }
+
     private func route(_ event: EventNotification) {
         guard let kind = DaemonEventKind(rawValue: event.kind) else {
             return // forward compat: unknown kinds bump nothing
@@ -355,15 +345,30 @@ final class DaemonConnectionModel {
             // storage path server-side and the subject IS the prompt uuid — no
             // payload decode needed.
             if let uuid = event.subjectUuid { hub.invalidate(.memories(uuid.lowercased())) }
-        case .clarificationChange, .architectureChange:
-            // Subject is the SUMMARY uuid; the registry (populated by phase
-            // stores from their own fetches) maps it back, with the payload's
-            // prompt_uuid (open/summarize/finalize only) as fallback. NO
-            // fan-out on miss: nothing renders an unopened summary, and
+        case .checkoutChange:
+            guard let payload = event.payload, let data = payload.data(using: .utf8),
+                  let decoded = try? WireCodec.decoder.decode(CheckoutChangePayload.self, from: data)
+            else { break }
+            checkoutSink?.applyCheckoutChange(
+                instanceUuid: decoded.instanceUuid.lowercased(),
+                headState: decoded.headState,
+                currentBranch: decoded.currentBranch,
+                currentSessionCode: decoded.currentSessionCode)
+        case .clarificationChange, .architectureChange, .explorationChange, .reviewChange:
+            // Subject is the SUMMARY uuid, but as of v8 EVERY phase payload
+            // carries prompt_uuid — decode and route directly. NO fan-out on
+            // miss for clarify/arch: nothing renders an unopened summary, and
             // opening one fetches fresh.
-            if let prompt = event.subjectUuid.flatMap({ owningPrompt(ofSummary: $0.lowercased()) })
-                ?? payloadUuids(event)?.promptUuid?.lowercased() {
+            if let prompt = payloadUuids(event)?.promptUuid?.lowercased() {
                 hub.invalidate(.prompt(prompt))
+            } else if kind == .reviewChange {
+                // The ONE v9 payload without prompt_uuid: REVIEW_CHANGE with
+                // action "resolve" (Store+Review resolve arm) — the fix
+                // loop's most frequent event, so dropping it would freeze
+                // every resolution badge and open-count. Wake open prompt
+                // panes instead; delete this arm when the daemon adds
+                // prompt_uuid there.
+                hub.invalidateAllPrompts()
             }
         case .configSet:
             // A root moved daemon-side — the env's PATHS_GET snapshot is stale.

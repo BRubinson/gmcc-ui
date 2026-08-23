@@ -11,6 +11,7 @@ import GMCCDaemonKit
 struct SessionPromptEditorView: View {
     @Environment(DaemonConnectionModel.self) private var daemon
     @Environment(CatalogStore.self) private var catalog
+    @Environment(WindowNav.self) private var nav
     let windowID: SessionWindowID
 
     @State private var scope: SessionScope
@@ -27,6 +28,13 @@ struct SessionPromptEditorView: View {
         // Create-or-get is side-effect-safe in init; the refcount lease lives
         // in onAppear/onDisappear, which SwiftUI balances.
         _scope = State(initialValue: SessionScopeCache.shared.scope(for: windowID.sessionUUID.wireString))
+        // Deep-link seed. Seeding in init (not onAppear) beats the newest-prompt
+        // default with no visible flash AND covers the grace-revived case, where
+        // prompts are already loaded so onChange(of: prompts) never fires.
+        // didDefaultSelect is pre-spent so the default rule can't overwrite it.
+        let target = windowID.targetPromptUUID?.wireString
+        _selectedUuid = State(initialValue: target)
+        _didDefaultSelect = State(initialValue: target != nil)
     }
 
     // Instance/project identity resolved from the catalog snapshot.
@@ -76,6 +84,14 @@ struct SessionPromptEditorView: View {
                     .disabled(store.session == nil)
                     .help("Create a new prompt in this session")
                 }
+                ToolbarItem {
+                    Button {
+                        nav.go(.search(SearchSeed(sessionUuid: windowID.sessionUUID.wireString)))
+                    } label: {
+                        Label("Search Session", systemImage: "magnifyingglass")
+                    }
+                    .help("Full-text search, scoped to this session")
+                }
             }
         } detail: {
             if let stub = selectedStub {
@@ -105,7 +121,6 @@ struct SessionPromptEditorView: View {
         .sheet(isPresented: $showCreatePrompt) {
             CreatePromptView(
                 store: store,
-                sessionStub: catalog.sessionsByUuid[store.sessionUuid],
                 sessionBackstory: store.session?.backstory ?? ""
             )
         }
@@ -118,6 +133,23 @@ struct SessionPromptEditorView: View {
                 didDefaultSelect = true
             }
         }
+        // Repeat deep-link into this already-open screen: `go`'s route-equality
+        // guard means no re-init, so the retarget arrives on the one-shot
+        // pending channel instead. Consuming clears it (the nil re-fire is
+        // guarded), keeping the channel armed for the next identical hit.
+        .onChange(of: nav.pendingPromptTarget) { _, target in
+            guard let target else { return }
+            selectedUuid = target.wireString
+            didDefaultSelect = true
+            nav.pendingPromptTarget = nil
+        }
+        .onAppear {
+            // The init path already consumed this screen's own seed — clear it
+            // so a later identical hit registers as a fresh change.
+            if nav.pendingPromptTarget == windowID.targetPromptUUID {
+                nav.pendingPromptTarget = nil
+            }
+        }
         // Event-driven refresh: SESSION_GET on session invalidations. The
         // stream is hoisted BEFORE the first refresh so an invalidation that
         // fires during the initial (prefetch-heavy) load isn't lost.
@@ -125,6 +157,15 @@ struct SessionPromptEditorView: View {
             let stream = daemon.hub.stream(for: .session(store.sessionUuid))
             if !catalog.hasLoaded { await catalog.refresh() }
             await store.refresh()
+            // A stale/foreign deep-link target degrades to the newest prompt
+            // rather than stranding the detail pane on "No Prompt Selected".
+            if selectedUuid == nil || !store.prompts.contains(where: { $0.uuid == selectedUuid }) {
+                selectedUuid = store.prompts.first?.uuid
+                // Re-arm the newest-prompt default when there was nothing to
+                // select — a pre-spent flag would otherwise block auto-select
+                // when this (empty) session gains its first prompt.
+                didDefaultSelect = selectedUuid != nil
+            }
             scope.registerPrompts(Set(store.prompts.map(\.uuid)), daemon: daemon)
             for await _ in stream {
                 await store.refresh()
@@ -278,6 +319,9 @@ private struct PromptEditorPane: View {
         /// True when memoryRoot is the exact directory PROMPT_MEMORY_CHANGED
         /// describes (see CkfsPathResolver.ResolvedMemory).
         var memoryIsDaemonWatched = false
+        /// Legacy prompt with nothing resolved (no backfill, by daemon
+        /// decision) — Memories renders a non-blocking unavailable state.
+        var memoryLegacyUnavailable = false
     }
 
     @State private var backstory = ""
@@ -316,6 +360,8 @@ private struct PromptEditorPane: View {
     @State private var phases: PromptPhaseStore
     @State private var clarifyExpanded = false
     @State private var archExpanded = false
+    @State private var exploreExpanded = false
+    @State private var reviewExpanded = false
     @Environment(WindowNav.self) private var nav
 
     init(stub: PromptStub, scope: SessionScope, windowID: SessionWindowID) {
@@ -342,10 +388,38 @@ private struct PromptEditorPane: View {
         PromptStatus(rawValue: stub.status) == .draft && saveIssue != .locked
     }
 
-    /// Draft prompts provably have no summaries — fetching would burst two
-    /// guaranteed NOT_FOUNDs per selection onto the serial queue.
+    /// Clarify/arch ONLY: draft prompts provably have no clarification or
+    /// architecture summary — fetching those two would burst guaranteed
+    /// NOT_FOUNDs per selection onto the serial queue. Exploration and review
+    /// are NEVER gated on this (EXPLORE_OPEN/REVIEW_OPEN are explicit-only
+    /// and legally run while the prompt is still draft) — this flag feeds
+    /// `refresh(lifecyclePhases:)`, which always fetches those two.
     private var phasesApply: Bool {
         PromptStatus(rawValue: stub.status) != .draft
+    }
+
+    // Live-phase-first badge precedence: the loaded response is authoritative
+    // (report writes don't re-list the session, so stub.reports goes stale);
+    // the PROMPT_LIST stub covers the cold start.
+    /// Does anything suggest an exploration/review summary exists for this
+    /// (draft) prompt? Loaded phases keep refreshing; otherwise trust the
+    /// listing's with_reports stubs.
+    private func reportsEvidence(_ fresh: PromptStub) -> Bool {
+        if case .loaded = phases.exploration { return true }
+        if case .loaded = phases.review { return true }
+        return fresh.reports?.exploration != nil || fresh.reports?.review != nil
+    }
+
+    private var explorationBadges: [ReportBadgeItem] {
+        if case .loaded(let response) = phases.exploration { return ReportBadgeItem.exploration(response) }
+        if let reportStub = stub.reports?.exploration { return ReportBadgeItem.exploration(reportStub) }
+        return []
+    }
+
+    private var reviewBadges: [ReportBadgeItem] {
+        if case .loaded(let response) = phases.review { return ReportBadgeItem.review(response) }
+        if let reportStub = stub.reports?.review { return ReportBadgeItem.review(reportStub) }
+        return []
     }
 
     /// Post-draft, the clarification's refined goal/detail SUPERSEDE the
@@ -483,14 +557,14 @@ private struct PromptEditorPane: View {
         // `version`.)
         .task(id: stub.uuid) {
             await load()
-            if phasesApply {
-                seedPhaseExpansion()
-                // Memoized store — a re-selection of an already-loaded prompt
-                // must not re-issue two guaranteed round trips (105 legacy
-                // prompts answer NOT_FOUND every time). The event loop below
-                // still refreshes on every real mutation.
-                if !phases.hasLoaded { await phases.refresh(daemon: daemon) }
-            }
+            seedPhaseExpansion()
+            // Memoized store — a re-selection of an already-loaded prompt
+            // must not re-issue guaranteed round trips (105 legacy prompts
+            // answer NOT_FOUND every time). The event loop below still
+            // refreshes on every real mutation. Explore/review always fetch
+            // (they legally exist at draft); `lifecyclePhases` only skips
+            // the two guaranteed-absent clarify/arch trips at draft.
+            if !phases.hasLoaded { await phases.refresh(lifecyclePhases: phasesApply) }
         }
         // Targeted refresh + echo/kbite/path reconciliation on this prompt's
         // events. Stream hoisted before any await so no invalidation is lost.
@@ -508,7 +582,19 @@ private struct PromptEditorPane: View {
                 await reconcileExternal()
                 reconcileKbites()
                 await resolvePaths()
-                if phasesApply { await phases.refresh(daemon: daemon) }
+                // Evidence-gated reports refresh (review finding): a draft
+                // autosave fires this loop on every flush, and a draft's
+                // reports are almost always absent — skip the two GETs unless
+                // the FRESHLY-listed stub (refreshPrompt above re-listed it
+                // with_reports; an EXPLORATION_CHANGE therefore surfaces a
+                // summary stub before we gate) or an already-loaded phase says
+                // a summary exists. The captured `stub` is stale inside this
+                // loop — read the live listing from the store.
+                let fresh = store.prompts.first { $0.uuid == stub.uuid } ?? stub
+                let isDraft = PromptStatus(rawValue: fresh.status) == .draft
+                await phases.refresh(
+                    lifecyclePhases: !isDraft,
+                    reports: !isDraft || reportsEvidence(fresh))
             }
         }
         // Status transitions (draft→clarifying→…→done) flip `editable` via
@@ -518,10 +604,8 @@ private struct PromptEditorPane: View {
         // captured self can hold a stale pre-transition status, so its
         // `phasesApply` misses the draft → clarifying boundary.
         .onChange(of: stub.status) { _, _ in
-            if phasesApply {
-                seedPhaseExpansion()
-                Task { await phases.refresh(daemon: daemon) }
-            }
+            seedPhaseExpansion()
+            Task { await phases.refresh(lifecyclePhases: phasesApply) }
         }
         // cmd+F opens the inline find bar over the three sections; nil while
         // the memories inspector is open so its reader owns the shortcut.
@@ -596,7 +680,8 @@ private struct PromptEditorPane: View {
                                           minHeight: 220, hint: "The approach, constraints, specifics.")
                         }
                         phaseCard("Clarification", systemImage: "questionmark.bubble",
-                                  expanded: $clarifyExpanded) {
+                                  expanded: $clarifyExpanded,
+                                  accessory: { EmptyView() }) {
                             if phasesApply {
                                 ClarificationPane(phase: phases.clarification)
                             } else {
@@ -604,11 +689,28 @@ private struct PromptEditorPane: View {
                             }
                         }
                         phaseCard("Architecture", systemImage: "square.stack.3d.up",
-                                  expanded: $archExpanded) {
+                                  expanded: $archExpanded,
+                                  accessory: { EmptyView() }) {
                             if phasesApply {
                                 ArchitecturePane(phase: phases.architecture)
                             } else {
                                 notStarted("Architecture begins after clarification completes.")
+                            }
+                        }
+                        // Exploration/review are UNGATED: their summaries are
+                        // explicit-only opens that legally exist at draft.
+                        phaseCard("Exploration", systemImage: "binoculars",
+                                  expanded: $exploreExpanded,
+                                  accessory: { ReportBadgeCluster(items: explorationBadges) }) {
+                            ExplorationPane(phase: phases.exploration) {
+                                await phases.requestFullExploration()
+                            }
+                        }
+                        phaseCard("Review", systemImage: "checkmark.seal",
+                                  expanded: $reviewExpanded,
+                                  accessory: { ReportBadgeCluster(items: reviewBadges) }) {
+                            ReviewPane(phase: phases.review) {
+                                await phases.requestFullReview()
                             }
                         }
                     }
@@ -680,14 +782,20 @@ private struct PromptEditorPane: View {
     /// only drives which one is expanded by default (seedPhaseExpansion).
     private func phaseCard(_ title: String, systemImage: String,
                            expanded: Binding<Bool>,
+                           @ViewBuilder accessory: () -> some View,
                            @ViewBuilder content: () -> some View) -> some View {
         let built = content()
+        let trailing = accessory()
         return DisclosureGroup(isExpanded: expanded) {
             built
                 .padding(.top, 8)
         } label: {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
+            HStack(spacing: 8) {
+                Label(title, systemImage: systemImage)
+                    .font(.headline)
+                Spacer()
+                trailing   // count badges — header signal, never a control
+            }
         }
         .padding(12)
         .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 10))
@@ -705,12 +813,28 @@ private struct PromptEditorPane: View {
     /// deliberately — emphasis follows the phase, not accumulation).
     private func seedPhaseExpansion() {
         switch PromptStatus(rawValue: stub.status) {
+        case .draft:
+            // Exploration is the one report that legally runs at draft
+            // (explicit-only open) — emphasize it, not clarify/arch.
+            exploreExpanded = true
+            clarifyExpanded = false
+            archExpanded = false
+            reviewExpanded = false
         case .clarifying:
             clarifyExpanded = true
             archExpanded = false
-        case .architecting, .implementing, .reviewing:
+            exploreExpanded = false
+            reviewExpanded = false
+        case .architecting, .implementing:
             archExpanded = true
             clarifyExpanded = false
+            exploreExpanded = false
+            reviewExpanded = false
+        case .reviewing:
+            reviewExpanded = true
+            clarifyExpanded = false
+            archExpanded = false
+            exploreExpanded = false
         default:
             break
         }
@@ -754,6 +878,15 @@ private struct PromptEditorPane: View {
                 model: memoriesModel,
                 promptUuid: stub.uuid,
                 isDaemonWatched: paths.memoryIsDaemonWatched
+            )
+        } else if paths.memoryLegacyUnavailable {
+            // Non-blocking by design (item 10): the legacy rows get no
+            // storage-path backfill, and guessing folders is worse than
+            // saying so.
+            ContentUnavailableView(
+                "Memory Unavailable",
+                systemImage: "archivebox",
+                description: Text("This legacy prompt predates per-prompt storage paths — its memory folder can't be located (and it has no registered artifacts).")
             )
         } else {
             ContentUnavailableView(
@@ -867,9 +1000,7 @@ private struct PromptEditorPane: View {
         let instance = catalog.instance(uuid: windowID.instanceUUID.wireString)
         let project = instance.flatMap { inst in catalog.projects.first { $0.uuid == inst.projectUuid } }
         let artifacts = store.promptDetails[stub.uuid]?.artifacts ?? []
-        let seq = stub.seq
-        let code = stub.code
-        let name = stub.name
+        let isLegacy = stub.isLegacy
         let storagePath = stub.ckfsRelativeStoragePath
         let resolved: ResolvedPaths = await Task.detached(priority: .userInitiated) {
             var p = ResolvedPaths()
@@ -882,15 +1013,15 @@ private struct PromptEditorPane: View {
             if let sessionStub {
                 p.sessionFolder = CkfsPathResolver.resolve(
                     relative: sessionStub.ckfsRelativeStoragePath, ckfsRoot: root)
-                p.promptFolder = CkfsPathResolver.promptFolder(
-                    ckfsRoot: root, session: sessionStub, seq: seq, code: code, name: name,
-                    storagePath: storagePath)
-                let memory = CkfsPathResolver.memoryRoot(
-                    ckfsRoot: root, session: sessionStub, seq: seq, code: code, name: name,
-                    storagePath: storagePath, artifacts: artifacts)
-                p.memoryRoot = memory.root
-                p.memoryIsDaemonWatched = memory.isDaemonWatched
             }
+            p.promptFolder = CkfsPathResolver.promptFolder(
+                ckfsRoot: root, storagePath: storagePath)
+            let memory = CkfsPathResolver.memoryRoot(
+                ckfsRoot: root, isLegacy: isLegacy,
+                storagePath: storagePath, artifacts: artifacts)
+            p.memoryRoot = memory.root
+            p.memoryIsDaemonWatched = memory.isDaemonWatched
+            p.memoryLegacyUnavailable = memory.legacyUnavailable
             if let instance {
                 p.instanceFolder = CkfsPathResolver.resolve(
                     relative: instance.ckfsRelativeStoragePath, ckfsRoot: root)

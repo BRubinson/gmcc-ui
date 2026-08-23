@@ -88,6 +88,23 @@ actor GMCCDaemonService {
         return try await perform { try $0.searchCatalog(CatalogSearchRequest(query: query, projectUuid: uuid, limit: limit)) }
     }
 
+    // MARK: - Full-text search (v8)
+
+    /// FTS5 search over prompt/clarification/architecture text. An empty kind
+    /// set is sent as nil — the daemon reads nil as "every kind".
+    func search(
+        query: String,
+        sessionUuid: String? = nil,
+        kinds: [SearchKind]? = nil,
+        limit: Int? = nil
+    ) async throws -> [SearchHit] {
+        let uuid = Self.normalized(sessionUuid)
+        let kindFilter = (kinds?.isEmpty ?? true) ? nil : kinds
+        return try await perform {
+            try $0.search(SearchRequest(query: query, sessionUuid: uuid, kinds: kindFilter, limit: limit)).hits
+        }
+    }
+
     // MARK: - Session
 
     func getSession(sessionUuid: String) async throws -> SessionGetResponse {
@@ -108,9 +125,17 @@ actor GMCCDaemonService {
 
     // MARK: - Prompt
 
-    func listPrompts(sessionUuid: String) async throws -> [PromptStub] {
+    /// `withReports` enriches each stub with clarification/architecture
+    /// summary stubs — one call replaces the per-prompt CLARIFY_GET/ARCH_GET
+    /// fan-out for gate precomputation.
+    func listPrompts(sessionUuid: String, withReports: Bool = false) async throws -> [PromptStub] {
         let uuid = Self.normalized(sessionUuid)
-        return try await perform { try $0.listPrompts(PromptListRequest(sessionUuid: uuid)).prompts }
+        return try await perform {
+            try $0.listPrompts(PromptListRequest(
+                sessionUuid: uuid,
+                withReports: withReports ? true : nil
+            )).prompts
+        }
     }
 
     func getPrompt(promptUuid: String) async throws -> PromptGetResponse {
@@ -167,6 +192,23 @@ actor GMCCDaemonService {
     func architecture(promptUuid: String) async throws -> ArchGetResponse {
         let uuid = Self.normalized(promptUuid)
         return try await perform { try $0.archGet(ArchGetRequest(promptUuid: uuid)) }
+    }
+
+    // MARK: - Exploration / review (v9, read-only)
+
+    /// Partitioned by default: `full: false` ⇒ the daemon's [0,99] window plus
+    /// EVERY unranked row (NULL ratings are always in-window — the ranking
+    /// agent's work queue). `full: true` returns the whole set; rating bounds
+    /// are deliberately not exposed (the wire rejects them alongside full, and
+    /// no surface here needs a custom window).
+    func exploration(promptUuid: String, full: Bool = false) async throws -> ExploreGetResponse {
+        let uuid = Self.normalized(promptUuid)
+        return try await perform { try $0.exploreGet(ExploreGetRequest(promptUuid: uuid, full: full)) }
+    }
+
+    func review(promptUuid: String, full: Bool = false) async throws -> ReviewGetResponse {
+        let uuid = Self.normalized(promptUuid)
+        return try await perform { try $0.reviewGet(ReviewGetRequest(promptUuid: uuid, full: full)) }
     }
 
     // MARK: - Git state / paths (v7)

@@ -58,6 +58,10 @@ public enum DaemonEventKind: String, Codable, Hashable, CaseIterable, Sendable {
     case clarificationChange = "CLARIFICATION_CHANGE"
     case architectureChange = "ARCHITECTURE_CHANGE"
     case configSet = "CONFIG_SET"
+    // v9 — durable rows like clarificationChange (never ephemeral): the
+    // exploration/review report machines.
+    case explorationChange = "EXPLORATION_CHANGE"
+    case reviewChange = "REVIEW_CHANGE"
     /// Ephemeral broadcast only (id 0, never a daemon_event row, never a
     /// replay cursor) — emitted by MemoryWatcher when a prompt's memory/
     /// directory changes on disk.
@@ -203,14 +207,111 @@ public enum SessionStatus: String, Codable, Hashable, CaseIterable, Sendable {
     case closed
 }
 
-/// Prompt artifact kinds — pointers to bot-phase memory/ files. `qualified`
-/// is the clarified-phase output registered as an artifact going forward.
+/// Prompt artifact kinds — pointers to bot-phase memory/ files. Since m0004
+/// every report kind (`explore`, `review`, `qualified`, `architecture`) is
+/// reserved for pre-migration legacy files only; post-m0004 reports are db
+/// rows served by the explore/review/clarify/arch machines.
 public enum ArtifactKind: String, Codable, Hashable, CaseIterable, Sendable {
     case explore
     case architecture
     case review
     case qualified
     case other
+}
+
+/// Exploration report lifecycle: exploring → complete, with one backward
+/// revision edge (complete → exploring, the `reopen` verb) — explore is the
+/// most re-run report (resume, team fallback), so re-runs update the same
+/// summary db-natively (last-run-wins, like the file world it replaces).
+public enum ExplorationStatus: String, Codable, Hashable, CaseIterable, Sendable {
+    case exploring
+    case complete
+
+    public var allowedNext: Set<ExplorationStatus> {
+        switch self {
+        case .exploring: return [.complete]
+        case .complete: return [.exploring]
+        }
+    }
+}
+
+/// Review report lifecycle: reviewing → complete, with the same backward
+/// revision edge as ExplorationStatus. Named ReviewSummaryStatus so it can't
+/// be confused with ReviewFindingStatus (the per-finding resolution machine).
+public enum ReviewSummaryStatus: String, Codable, Hashable, CaseIterable, Sendable {
+    case reviewing
+    case complete
+
+    public var allowedNext: Set<ReviewSummaryStatus> {
+        switch self {
+        case .reviewing: return [.complete]
+        case .complete: return [.reviewing]
+        }
+    }
+}
+
+/// What an exploration finding is about.
+public enum ExplorationFindingKind: String, Codable, Hashable, CaseIterable, Sendable {
+    case persistenceModel = "persistence_model"
+    case implementationPattern = "implementation_pattern"
+    case existingFunctionality = "existing_functionality"
+    case scopeCreepRisk = "scope_creep_risk"
+    case generalRelevantChange = "general_relevant_change"
+    case other
+}
+
+/// What a review finding is about.
+public enum ReviewFindingKind: String, Codable, Hashable, CaseIterable, Sendable {
+    case correctnessBug = "correctness_bug"
+    case specDeviation = "spec_deviation"
+    case regressionRisk = "regression_risk"
+    case security
+    case simplification
+    case other
+}
+
+/// The review's overall verdict, carried only by REVIEW_COMPLETE.
+/// `legacy_unstated` exists for the verbatim migration of pre-m0004 review
+/// files whose text never states a verdict — inventing one there would
+/// fabricate history.
+public enum ReviewVerdict: String, Codable, Hashable, CaseIterable, Sendable {
+    case approved
+    case approvedWithNits = "approved_with_nits"
+    case changesRequested = "changes_requested"
+    case legacyUnstated = "legacy_unstated"
+}
+
+/// Per-finding resolution, recorded during the fix loop (which runs AFTER the
+/// summary completes — the deliberate inversion of the clarify child-lock).
+/// open → fixed | accepted | wont_fix, plus lateral correction edges among the
+/// resolved values; never back to open.
+public enum ReviewFindingStatus: String, Codable, Hashable, CaseIterable, Sendable {
+    case open
+    case fixed
+    case accepted
+    case wontFix = "wont_fix"
+
+    public var allowedNext: Set<ReviewFindingStatus> {
+        switch self {
+        case .open: return [.fixed, .accepted, .wontFix]
+        case .fixed: return [.accepted, .wontFix]
+        case .accepted: return [.fixed, .wontFix]
+        case .wontFix: return [.fixed, .accepted]
+        }
+    }
+}
+
+/// One (finding, rating) pair of a batch rank. Ratings run 0–999: 0 is an
+/// absolute critical finding, 999 an always-false-positive tombstone; the
+/// consumption threshold sits at 100.
+public struct FindingRating: Codable, Hashable, Sendable {
+    public let findingUuid: String
+    public let rating: Int
+
+    public init(findingUuid: String, rating: Int) {
+        self.findingUuid = findingUuid
+        self.rating = rating
+    }
 }
 
 // MARK: - HELLO
@@ -1104,7 +1205,9 @@ public struct KbiteSearchResponse: Codable, Hashable, Sendable {
 
 // MARK: - SEARCH
 
-/// The six searchable row kinds. Raw values match the source table names.
+/// The searchable row kinds. Raw values match the source table names.
+/// (v9 added the five exploration/review kinds — discharging m0003's
+/// explore.md/review.md deferral note.)
 public enum SearchKind: String, Codable, Hashable, CaseIterable, Sendable {
     case prompt
     case clarification
@@ -1112,6 +1215,11 @@ public enum SearchKind: String, Codable, Hashable, CaseIterable, Sendable {
     case architectureSummary = "architecture_summary"
     case architectureGeneralChange = "architecture_general_change"
     case architecturePersistenceChange = "architecture_persistence_change"
+    case explorationSummary = "exploration_summary"
+    case explorationKeyFile = "exploration_key_file"
+    case explorationFinding = "exploration_finding"
+    case reviewSummary = "review_summary"
+    case reviewFinding = "review_finding"
 }
 
 /// FTS5 full-text search over prompt/clarification/architecture text —
@@ -1591,6 +1699,352 @@ public struct ArchGetResponse: Codable, Hashable, Sendable {
         self.generalChanges = generalChanges
         self.unplannedChanges = unplannedChanges
         self.orderingRespected = orderingRespected
+    }
+}
+
+// MARK: - EXPLORE_* (v9)
+
+public struct ExploreOpenRequest: Codable, Hashable, Sendable {
+    public let promptUuid: String
+
+    public init(promptUuid: String) {
+        self.promptUuid = promptUuid
+    }
+}
+
+/// Shared response for explore verbs that return the summary row. `created`
+/// is true only when OPEN made the row (open is idempotent create-or-return;
+/// it is EXPLICIT-only — never wired into prompt status transitions, since
+/// exploration runs while the prompt is still `draft`).
+public struct ExploreSummaryResponse: Codable, Hashable, Sendable {
+    public let summary: ExplorationSummaryRow
+    public let created: Bool
+
+    public init(summary: ExplorationSummaryRow, created: Bool = false) {
+        self.summary = summary
+        self.created = created
+    }
+}
+
+/// Add one key file (summary must be `exploring`). Key files are a shared
+/// deduped set: a duplicate path is an idempotent upsert-ignore returning the
+/// existing row with created=false, never an error.
+public struct ExploreKeyFileAddRequest: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let filePath: String
+
+    public init(summaryUuid: String, filePath: String) {
+        self.summaryUuid = summaryUuid
+        self.filePath = filePath
+    }
+}
+
+public struct ExploreKeyFileAddResponse: Codable, Hashable, Sendable {
+    public let keyFile: ExplorationKeyFileRow
+    public let created: Bool
+
+    public init(keyFile: ExplorationKeyFileRow, created: Bool) {
+        self.keyFile = keyFile
+        self.created = created
+    }
+}
+
+/// Insert a finding while the summary is `exploring`. `rating` is optional at
+/// insert — NULL marks the finding unranked (work-in-progress); COMPLETE
+/// refuses while any finding is unranked.
+public struct ExploreFindingAddRequest: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let kind: ExplorationFindingKind
+    public let title: String
+    public let body: String
+    public let agentName: String
+    public let rating: Int?
+
+    public init(
+        summaryUuid: String,
+        kind: ExplorationFindingKind,
+        title: String,
+        body: String,
+        agentName: String,
+        rating: Int? = nil
+    ) {
+        self.summaryUuid = summaryUuid
+        self.kind = kind
+        self.title = title
+        self.body = body
+        self.agentName = agentName
+        self.rating = rating
+    }
+}
+
+public struct ExploreFindingRowResponse: Codable, Hashable, Sendable {
+    public let finding: ExplorationFindingRow
+
+    public init(finding: ExplorationFindingRow) {
+        self.finding = finding
+    }
+}
+
+/// Batch-rank findings (summary must be `exploring` — ranking a sealed set
+/// would shift the sub-100 contract; reopen first). The whole batch validates
+/// before any write and applies atomically: one bad pair (out-of-range,
+/// duplicate, or a finding not belonging to this summary) rejects everything.
+/// Deliberately version-less: the team re-ranker blind-overwrites ratings it
+/// never read — that IS the specified semantic — and the single-writer
+/// DatabaseQueue serializes competing batches. Re-rank = same verb again.
+public struct ExploreRankRequest: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let ratings: [FindingRating]
+
+    public init(summaryUuid: String, ratings: [FindingRating]) {
+        self.summaryUuid = summaryUuid
+        self.ratings = ratings
+    }
+}
+
+public struct ExploreRankResponse: Codable, Hashable, Sendable {
+    public let summary: ExplorationSummaryRow
+    public let updatedCount: Int
+    /// 0 ⇒ COMPLETE will pass its rank gate.
+    public let unrankedCount: Int
+
+    public init(summary: ExplorationSummaryRow, updatedCount: Int, unrankedCount: Int) {
+        self.summary = summary
+        self.updatedCount = updatedCount
+        self.unrankedCount = unrankedCount
+    }
+}
+
+/// exploring → complete. Refuses while any finding is unranked. `overview` is
+/// carried ONLY here — there is no earlier write path, so the narrative is
+/// structurally written by the primary agent after the ranked findings exist.
+public struct ExploreCompleteRequest: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let expectedVersion: Int64
+    public let overview: String
+
+    public init(summaryUuid: String, expectedVersion: Int64, overview: String) {
+        self.summaryUuid = summaryUuid
+        self.expectedVersion = expectedVersion
+        self.overview = overview
+    }
+}
+
+/// complete → exploring: the revision edge. Preserves everything (findings,
+/// ratings, key files, overview) — the next COMPLETE must re-carry the
+/// overview, so staleness cannot survive a re-seal.
+public struct ExploreReopenRequest: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let expectedVersion: Int64
+
+    public init(summaryUuid: String, expectedVersion: Int64) {
+        self.summaryUuid = summaryUuid
+        self.expectedVersion = expectedVersion
+    }
+}
+
+/// Threshold-partitioned read. Default window is ratings under 100; findings
+/// inside the window (or unranked — NULL-rated rows are ALWAYS full, they are
+/// the resume work-queue) come back as full rows, the rest as stubs.
+/// full=true returns everything full; ratingMax/ratingMin shift the window.
+public struct ExploreGetRequest: Codable, Hashable, Sendable {
+    public let promptUuid: String
+    public let full: Bool
+    public let ratingMin: Int?
+    public let ratingMax: Int?
+
+    public init(promptUuid: String, full: Bool = false, ratingMin: Int? = nil, ratingMax: Int? = nil) {
+        self.promptUuid = promptUuid
+        self.full = full
+        self.ratingMin = ratingMin
+        self.ratingMax = ratingMax
+    }
+}
+
+public struct ExploreGetResponse: Codable, Hashable, Sendable {
+    public let summary: ExplorationSummaryRow
+    public let keyFiles: [ExplorationKeyFileRow]
+    /// Full rows: rating inside the window OR unranked, ordered unranked
+    /// first, then by rating ascending.
+    public let findings: [ExplorationFindingRow]
+    /// Lightweight stubs for everything outside the window.
+    public let findingStubs: [ExplorationFindingStub]
+
+    public init(
+        summary: ExplorationSummaryRow,
+        keyFiles: [ExplorationKeyFileRow],
+        findings: [ExplorationFindingRow],
+        findingStubs: [ExplorationFindingStub]
+    ) {
+        self.summary = summary
+        self.keyFiles = keyFiles
+        self.findings = findings
+        self.findingStubs = findingStubs
+    }
+}
+
+// MARK: - REVIEW_* (v9)
+
+public struct ReviewOpenRequest: Codable, Hashable, Sendable {
+    public let promptUuid: String
+
+    public init(promptUuid: String) {
+        self.promptUuid = promptUuid
+    }
+}
+
+/// Same contract as ExploreSummaryResponse: open is idempotent and EXPLICIT-
+/// only — prompt status transitions never create or gate on this summary
+/// (skip-to-done stays legal).
+public struct ReviewSummaryResponse: Codable, Hashable, Sendable {
+    public let summary: ReviewSummaryRow
+    public let created: Bool
+
+    public init(summary: ReviewSummaryRow, created: Bool = false) {
+        self.summary = summary
+        self.created = created
+    }
+}
+
+/// Insert a finding while the summary is `reviewing`. filePath is nil for
+/// cross-cutting findings; lineEnd requires lineStart.
+public struct ReviewFindingAddRequest: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let kind: ReviewFindingKind
+    public let title: String
+    public let body: String
+    public let filePath: String?
+    public let lineStart: Int?
+    public let lineEnd: Int?
+    public let agentName: String
+    public let rating: Int?
+
+    public init(
+        summaryUuid: String,
+        kind: ReviewFindingKind,
+        title: String,
+        body: String,
+        filePath: String? = nil,
+        lineStart: Int? = nil,
+        lineEnd: Int? = nil,
+        agentName: String,
+        rating: Int? = nil
+    ) {
+        self.summaryUuid = summaryUuid
+        self.kind = kind
+        self.title = title
+        self.body = body
+        self.filePath = filePath
+        self.lineStart = lineStart
+        self.lineEnd = lineEnd
+        self.agentName = agentName
+        self.rating = rating
+    }
+}
+
+public struct ReviewFindingRowResponse: Codable, Hashable, Sendable {
+    public let finding: ReviewFindingRow
+
+    public init(finding: ReviewFindingRow) {
+        self.finding = finding
+    }
+}
+
+/// Batch rank — same contract and rationale as ExploreRankRequest.
+public struct ReviewRankRequest: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let ratings: [FindingRating]
+
+    public init(summaryUuid: String, ratings: [FindingRating]) {
+        self.summaryUuid = summaryUuid
+        self.ratings = ratings
+    }
+}
+
+public struct ReviewRankResponse: Codable, Hashable, Sendable {
+    public let summary: ReviewSummaryRow
+    public let updatedCount: Int
+    public let unrankedCount: Int
+
+    public init(summary: ReviewSummaryRow, updatedCount: Int, unrankedCount: Int) {
+        self.summary = summary
+        self.updatedCount = updatedCount
+        self.unrankedCount = unrankedCount
+    }
+}
+
+/// Record one finding's resolution. Pure child-row update, expectedVersion
+/// targets the FINDING. Deliberately UNGATED on summary status — the fix loop
+/// runs after COMPLETE, and a reopen mid-loop must not strand in-flight
+/// resolves (the inversion of the clarify child-lock, by design).
+public struct ReviewResolveRequest: Codable, Hashable, Sendable {
+    public let findingUuid: String
+    public let expectedVersion: Int64
+    public let status: ReviewFindingStatus
+
+    public init(findingUuid: String, expectedVersion: Int64, status: ReviewFindingStatus) {
+        self.findingUuid = findingUuid
+        self.expectedVersion = expectedVersion
+        self.status = status
+    }
+}
+
+/// reviewing → complete. Refuses while any finding is unranked; requires a
+/// verdict. overview + verdict are carried ONLY here (primary-agent-only by
+/// write-path shape).
+public struct ReviewCompleteRequest: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let expectedVersion: Int64
+    public let overview: String
+    public let verdict: ReviewVerdict
+
+    public init(summaryUuid: String, expectedVersion: Int64, overview: String, verdict: ReviewVerdict) {
+        self.summaryUuid = summaryUuid
+        self.expectedVersion = expectedVersion
+        self.overview = overview
+        self.verdict = verdict
+    }
+}
+
+/// complete → reviewing: the revision edge (same preservation contract as
+/// ExploreReopenRequest; the persisted verdict survives until re-complete).
+public struct ReviewReopenRequest: Codable, Hashable, Sendable {
+    public let summaryUuid: String
+    public let expectedVersion: Int64
+
+    public init(summaryUuid: String, expectedVersion: Int64) {
+        self.summaryUuid = summaryUuid
+        self.expectedVersion = expectedVersion
+    }
+}
+
+public struct ReviewGetRequest: Codable, Hashable, Sendable {
+    public let promptUuid: String
+    public let full: Bool
+    public let ratingMin: Int?
+    public let ratingMax: Int?
+
+    public init(promptUuid: String, full: Bool = false, ratingMin: Int? = nil, ratingMax: Int? = nil) {
+        self.promptUuid = promptUuid
+        self.full = full
+        self.ratingMin = ratingMin
+        self.ratingMax = ratingMax
+    }
+}
+
+public struct ReviewGetResponse: Codable, Hashable, Sendable {
+    public let summary: ReviewSummaryRow
+    public let findings: [ReviewFindingRow]
+    public let findingStubs: [ReviewFindingStub]
+
+    public init(
+        summary: ReviewSummaryRow,
+        findings: [ReviewFindingRow],
+        findingStubs: [ReviewFindingStub]
+    ) {
+        self.summary = summary
+        self.findings = findings
+        self.findingStubs = findingStubs
     }
 }
 

@@ -11,6 +11,7 @@ struct GlobalNavRail: View {
             railButton("Home", systemImage: "house") { nav.home() }
             railButton("Projects", systemImage: "folder") { nav.go(.projects) }
             railButton("Knowledge Bites", systemImage: "lightbulb") { nav.go(.kbites) }
+            railButton("Search", systemImage: "magnifyingglass") { nav.go(.search(SearchSeed())) }
             Spacer()
         }
         .padding(10)

@@ -11,10 +11,6 @@ struct CreatePromptView: View {
     @Environment(GMCCEnvironment.self) private var gmcc
 
     let store: SessionStore
-    // The session's catalog stub — needed to create the prompt folder on disk
-    // and to store the ckfs path on the row. nil when the catalog hasn't
-    // resolved the session (folder creation is skipped, row still created).
-    let sessionStub: SessionStub?
     // Parent session's backstory, inherited into the new prompt at sheet-open
     // (pre-filled, editable — the prompt's backstory may then diverge).
     let sessionBackstory: String
@@ -116,12 +112,11 @@ struct CreatePromptView: View {
         let service = GMCCDaemonService.shared
         let kbites = availableKbites.filter { selectedKbites.contains($0) }   // stable order
         do {
-            // Code passed EXPLICITLY — a nil code defaults to "p{seq}", which
-            // would diverge from the prompts/<seq>_<code> folder convention.
+            // Code passed EXPLICITLY — a nil code defaults to "p{seq}".
             // ckfsRelativeStoragePath stays nil: the daemon allocates seq
-            // atomically, so the final path is unknowable client-side pre-create
-            // (a half-path would be worse than none); the exact folder created
-            // below is what promptFolder()'s rule 1 matches.
+            // atomically and derives the slugged path itself (v8); the
+            // returned row's path is the only folder the resolver (and the
+            // daemon's MemoryWatcher) will ever look at.
             let row = try await service.createPrompt(PromptCreateRequest(
                 sessionUuid: store.sessionUuid,
                 code: segment,
@@ -138,18 +133,17 @@ struct CreatePromptView: View {
             // Created at the daemon-returned storage path VERBATIM: the
             // daemon's MemoryWatcher matches that string exactly, so a slugged
             // folder of our own would never receive PROMPT_MEMORY_CHANGED
-            // (spaces/capitals in the dirname are the accepted cost).
-            if let root = gmcc[.ckfsRoot], !root.isEmpty {
-                let folder: URL? = row.ckfsRelativeStoragePath.isEmpty
-                    ? sessionStub.map { CkfsPathResolver.conventionalPromptFolder(
-                          ckfsRoot: root, session: $0, seq: row.seq, code: row.code) }
-                    : URL(fileURLWithPath: root, isDirectory: true)
-                          .appendingPathComponent(row.ckfsRelativeStoragePath, isDirectory: true)
-                if let folder {
-                    let memory = folder.appendingPathComponent("memory", isDirectory: true)
-                    try? FileManager.default.createDirectory(
-                        at: memory, withIntermediateDirectories: true)
-                }
+            // (spaces/capitals in the dirname are the accepted cost). An
+            // empty storage path creates NOTHING: the resolver has no
+            // guessing legs, so a conventionally-named folder could never be
+            // found again.
+            if let root = gmcc[.ckfsRoot], !root.isEmpty,
+               !row.ckfsRelativeStoragePath.isEmpty {
+                let memory = URL(fileURLWithPath: root, isDirectory: true)
+                    .appendingPathComponent(row.ckfsRelativeStoragePath, isDirectory: true)
+                    .appendingPathComponent("memory", isDirectory: true)
+                try? FileManager.default.createDirectory(
+                    at: memory, withIntermediateDirectories: true)
             }
             await store.refresh()
             isSaving = false

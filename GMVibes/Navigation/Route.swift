@@ -11,6 +11,16 @@ enum Route: Codable, Hashable {
     case kbites
     case kbiteFile(URL)
     case promptMemories(PromptMemoriesWindowID)
+    case search(SearchSeed)
+}
+
+/// Seed for the dedicated SEARCH screen. uuid-only scope (the session name is
+/// resolved from CatalogStore at render time, per SessionWindowID's doctrine);
+/// `query` carries the ⌘K palette's text across the hand-off so "show all
+/// results" doesn't drop the user on an empty page.
+struct SearchSeed: Codable, Hashable {
+    var sessionUuid: String? = nil
+    var query: String = ""
 }
 
 /// Window identity. `id` is unique per open, so `WindowGroup(for:)` NEVER
