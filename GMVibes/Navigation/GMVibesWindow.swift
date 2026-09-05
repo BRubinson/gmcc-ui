@@ -9,6 +9,10 @@ struct GMVibesWindow: View {
     @Environment(DaemonConnectionModel.self) private var daemon
     @Environment(GMCCEnvironment.self) private var gmcc
     @State private var nav: WindowNav
+    // Above the `.id(nav.route)` boundary so drawings survive in-window
+    // navigation (including the session screen's own Search round-trip) and
+    // die with the window.
+    @State private var drawings = DrawingsStore()
 
     init(seed: WindowSeed) {
         _nav = State(initialValue: WindowNav(initial: seed.route))
@@ -35,35 +39,11 @@ struct GMVibesWindow: View {
         // The shared app top bar, leading group — identical on every window.
         // Middle (title/subtitle) and trailing slot are declared per screen via
         // .navigationTitle/.navigationSubtitle and .toolbar(.primaryAction).
+        // The session route declares the group ITSELF, from its sidebar column
+        // (see GlobalToolbarGroup) — declaring it here too would duplicate it.
         .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
-                if nav.canGoBack {
-                    Button {
-                        nav.goBack()
-                    } label: {
-                        Label("Back", systemImage: "chevron.backward")
-                    }
-                    .help("Go back")
-                }
-                GmccDaemonStatus()
-                Button {
-                    nav.railOpen.toggle()
-                } label: {
-                    Label("Toggle Sidebar", systemImage: "sidebar.leading")
-                }
-                .help("Toggle the global navigation sidebar")
-                Button {
-                    openWindow(value: WindowSeed())
-                } label: {
-                    Label("New Window", systemImage: "macwindow.badge.plus")
-                }
-                .help("Open a new GM Vibes window on the landing page")
-                Button {
-                    nav.paletteOpen = true
-                } label: {
-                    Label("Actions", systemImage: "command")
-                }
-                .help("App-wide actions (⌘K)")
+            if !routeIsSession {
+                GlobalToolbarGroup(nav: nav, openWindow: openWindow)
             }
         }
         .overlay {
@@ -83,6 +63,12 @@ struct GMVibesWindow: View {
             }
         }
         .environment(nav)
+        .environment(drawings)
+    }
+
+    private var routeIsSession: Bool {
+        if case .session = nav.route { return true }
+        return false
     }
 
     @ViewBuilder
@@ -110,6 +96,55 @@ struct GMVibesWindow: View {
         case .search(let seed):
             SearchScreen(seed: seed)
                 .todoTrailingSlot()
+        }
+    }
+}
+
+/// The app-wide top-bar group: Back · daemon status pill · rail toggle · new
+/// window · ⌘K actions. One definition, two hosts — GMVibesWindow for plain
+/// routes, and the session screen's SIDEBAR column (so the group lands in the
+/// toolbar's leading section, level with the sidebar, instead of after the
+/// column divider). Dependencies are passed in rather than read from
+/// @Environment so the struct stays host-agnostic.
+struct GlobalToolbarGroup: ToolbarContent {
+    let nav: WindowNav
+    let openWindow: OpenWindowAction
+    /// `.navigation` on plain routes (leading edge of a bar with no columns).
+    /// The session sidebar passes `.automatic`: on macOS, DEFAULT-placement
+    /// items declared by the sidebar column render in the toolbar's sidebar
+    /// section, left of the divider — `.navigation` items are pinned right of
+    /// it no matter which column declares them.
+    var placement: ToolbarItemPlacement = .navigation
+
+    var body: some ToolbarContent {
+        ToolbarItemGroup(placement: placement) {
+            if nav.canGoBack {
+                Button {
+                    nav.goBack()
+                } label: {
+                    Label("Back", systemImage: "chevron.backward")
+                }
+                .help("Go back")
+            }
+            GmccDaemonStatus()
+            Button {
+                nav.railOpen.toggle()
+            } label: {
+                Label("Toggle Sidebar", systemImage: "sidebar.leading")
+            }
+            .help("Toggle the global navigation sidebar")
+            Button {
+                openWindow(value: WindowSeed())
+            } label: {
+                Label("New Window", systemImage: "macwindow.badge.plus")
+            }
+            .help("Open a new GM Vibes window on the landing page")
+            Button {
+                nav.paletteOpen = true
+            } label: {
+                Label("Actions", systemImage: "command")
+            }
+            .help("App-wide actions (⌘K)")
         }
     }
 }
