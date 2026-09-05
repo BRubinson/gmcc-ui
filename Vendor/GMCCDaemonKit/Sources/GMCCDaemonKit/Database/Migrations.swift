@@ -14,7 +14,7 @@ public enum Migrations {
     /// skips a changed body on an existing db, so any schema change lands as a
     /// new registerMigration and existing databases upgrade in place. Never
     /// instruct anyone to wipe ~/gmcc/gmcc.db* again.
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 6
 
     /// The five BaseEntity columns wrapped into every domain table.
     /// `id` is the internal rowid; `uuid` is the external join key — all FKs
@@ -668,6 +668,286 @@ public enum Migrations {
             try db.execute(
                 sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 arguments: [4, Store.isoNow()]
+            )
+        }
+
+
+        // m0005 — purge the legacy concepts. Three rebuilds plus a backfill.
+        //
+        // The plugin no longer has a legacy tier: YEETS is gone, the yaml era
+        // is gone, and every bot report is db-native. What kept the legacy
+        // FORK alive was data — 66 clarification rows categorised yeet_type,
+        // 84 review verdicts of legacy_unstated, and 105 pre-m0002 prompts
+        // carrying no clarification/architecture summary at all, whose only
+        // record was an on-disk qualified.md/architecture.md reached through
+        // SUMMARY_ABSENT + prompt_is_legacy. This migration removes that data
+        // reason so the fork can leave the code. Uniformity was chosen over
+        // fidelity by explicit decision: the placeholder summaries assert a
+        // completeness the underlying history does not have, and point at the
+        // file for anyone who wants the real content.
+        //
+        // SQLite cannot alter a CHECK, so clarification, review_summary and
+        // prompt_artifact rebuild. Registered with NO foreignKeyChecks:
+        // argument for the same reason m0002 is — GRDB's default .deferred IS
+        // the official SQLite 12-step, and with FK enforcement live the
+        // review_summary drop would CASCADE every review_finding away. NO
+        // PRAGMA may appear in this body. Each rebuild copies `id` explicitly:
+        // the external-content FTS5 mirrors join on content_rowid='id', and a
+        // DROP TABLE takes the source table's triggers with it, so every
+        // rebuilt table recreates its triggers and re-runs the fts rebuild.
+        migrator.registerMigration("m0005_purgeLegacyConcepts") { db in
+            // Step 1 — data motion FIRST, so the narrowed CHECKs hold when the
+            // rebuilt tables are populated.
+            try db.execute(sql: """
+                UPDATE clarification SET category = 'detail'
+                 WHERE category = 'yeet_type';
+
+                UPDATE review_summary SET verdict = 'approved'
+                 WHERE verdict = 'legacy_unstated';
+                """)
+
+            // Step 2 — clarification: drop yeet_type from the category CHECK.
+            try db.execute(sql: """
+                CREATE TABLE clarification_new (
+                    \(baseColumns),
+                    clarification_summary_uuid TEXT NOT NULL
+                        REFERENCES clarification_summary(uuid) ON DELETE CASCADE,
+                    seq INTEGER NOT NULL,
+                    category TEXT NOT NULL
+                        CHECK (category IN ('goal', 'detail')),
+                    question TEXT NOT NULL,
+                    answer TEXT,
+                    answer_source TEXT
+                        CHECK (answer_source IN ('user', 'bot_inferred')),
+                    status TEXT NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open', 'answered', 'skipped')),
+                    CHECK (status != 'answered' OR answer IS NOT NULL),
+                    UNIQUE(clarification_summary_uuid, seq)
+                );
+
+                INSERT INTO clarification_new
+                    (id, uuid, version, created_at, updated_at,
+                     clarification_summary_uuid, seq, category, question,
+                     answer, answer_source, status)
+                SELECT id, uuid, version, created_at, updated_at,
+                       clarification_summary_uuid, seq, category, question,
+                       answer, answer_source, status
+                  FROM clarification;
+
+                DROP TABLE clarification;
+                ALTER TABLE clarification_new RENAME TO clarification;
+
+                CREATE INDEX idx_clarification_summary_uuid_fk
+                    ON clarification(clarification_summary_uuid);
+                """)
+
+            // Step 3 — review_summary: drop legacy_unstated from the verdict
+            // CHECK. review_finding CASCADE-references this table by uuid;
+            // ordering is create-new / copy / drop-old / rename-new so the
+            // only ALTER renames a table with zero referrers.
+            try db.execute(sql: """
+                CREATE TABLE review_summary_new (
+                    \(baseColumns),
+                    prompt_uuid TEXT NOT NULL REFERENCES prompt(uuid) ON DELETE CASCADE,
+                    status TEXT NOT NULL DEFAULT 'reviewing'
+                        CHECK (status IN ('reviewing', 'complete')),
+                    verdict TEXT
+                        CHECK (verdict IN ('approved', 'approved_with_nits',
+                                           'changes_requested')),
+                    overview TEXT NOT NULL DEFAULT '',
+                    CHECK (status != 'complete' OR verdict IS NOT NULL),
+                    UNIQUE(prompt_uuid)
+                );
+
+                INSERT INTO review_summary_new
+                    (id, uuid, version, created_at, updated_at,
+                     prompt_uuid, status, verdict, overview)
+                SELECT id, uuid, version, created_at, updated_at,
+                       prompt_uuid, status, verdict, overview
+                  FROM review_summary;
+
+                DROP TABLE review_summary;
+                ALTER TABLE review_summary_new RENAME TO review_summary;
+
+                CREATE INDEX idx_review_summary_prompt_uuid
+                    ON review_summary(prompt_uuid);
+                """)
+
+            // Step 4 — prompt_artifact: drop the kind column. Every legal
+            // value described a pre-migration report file except 'other',
+            // which is the only value a current bot may write; a column with
+            // one legal value carries no information. Rows keep file_path and
+            // note. No FTS mirror on this table.
+            try db.execute(sql: """
+                CREATE TABLE prompt_artifact_new (
+                    \(baseColumns),
+                    prompt_uuid TEXT NOT NULL REFERENCES prompt(uuid) ON DELETE CASCADE,
+                    file_path TEXT NOT NULL,
+                    note TEXT,
+                    UNIQUE(prompt_uuid, file_path)
+                );
+
+                INSERT INTO prompt_artifact_new
+                    (id, uuid, version, created_at, updated_at,
+                     prompt_uuid, file_path, note)
+                SELECT id, uuid, version, created_at, updated_at,
+                       prompt_uuid, file_path, note
+                  FROM prompt_artifact;
+
+                DROP TABLE prompt_artifact;
+                ALTER TABLE prompt_artifact_new RENAME TO prompt_artifact;
+
+                CREATE INDEX idx_prompt_artifact_prompt_uuid
+                    ON prompt_artifact(prompt_uuid);
+                """)
+
+            // Step 5 — recreate the FTS triggers the drops took with them, and
+            // rebuild both indexes. A private copy of the m0003 loop: frozen
+            // migrations stay self-contained, never share helpers.
+            struct FtsSpec {
+                let source: String
+                let columns: [String]
+            }
+            let specs = [
+                FtsSpec(source: "clarification", columns: ["question", "answer"]),
+                FtsSpec(source: "review_summary", columns: ["overview"]),
+            ]
+            for spec in specs {
+                let fts = "\(spec.source)_fts"
+                let cols = spec.columns.joined(separator: ", ")
+                let newVals = spec.columns.map { "new.\($0)" }.joined(separator: ", ")
+                let oldVals = spec.columns.map { "old.\($0)" }.joined(separator: ", ")
+                try db.execute(sql: """
+                    CREATE TRIGGER \(spec.source)_ai AFTER INSERT ON \(spec.source) BEGIN
+                        INSERT INTO \(fts)(rowid, \(cols))
+                        VALUES (new.id, \(newVals));
+                    END;
+
+                    CREATE TRIGGER \(spec.source)_ad AFTER DELETE ON \(spec.source) BEGIN
+                        INSERT INTO \(fts)(\(fts), rowid, \(cols))
+                        VALUES ('delete', old.id, \(oldVals));
+                    END;
+
+                    CREATE TRIGGER \(spec.source)_au AFTER UPDATE ON \(spec.source) BEGIN
+                        INSERT INTO \(fts)(\(fts), rowid, \(cols))
+                        VALUES ('delete', old.id, \(oldVals));
+                        INSERT INTO \(fts)(rowid, \(cols))
+                        VALUES (new.id, \(newVals));
+                    END;
+
+                    INSERT INTO \(fts)(\(fts)) VALUES('rebuild');
+                    """)
+            }
+
+            // Step 6 — the backfill. Every prompt gets a clarification and an
+            // architecture summary so SUMMARY_ABSENT can never again mean
+            // "this one is legacy, go read a file". Placeholders land at
+            // terminal status (complete / approved) so no lifecycle gate sees
+            // a half-open summary, and carry ZERO child rows — a placeholder
+            // asserts nothing it cannot back up. The body is a pointer to the
+            // on-disk file, which stays the real record.
+            let now = Store.isoNow()
+
+            let missingClarification = try Row.fetchAll(db, sql: """
+                SELECT p.uuid AS prompt_uuid, p.ckfs_relative_storage_path AS storage_path
+                  FROM prompt p
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM clarification_summary c WHERE c.prompt_uuid = p.uuid
+                 )
+                """)
+            for row in missingClarification {
+                let promptUuid: String = row["prompt_uuid"]
+                let storagePath: String = row["storage_path"]
+                let pointer = """
+                    m0005 placeholder. This prompt predates db-native \
+                    clarifications; the real record, if any, is the file at \
+                    \(storagePath)/memory/qualified.md
+                    """
+                try db.execute(sql: """
+                    INSERT INTO clarification_summary
+                        (uuid, version, created_at, updated_at, prompt_uuid,
+                         status, backstory_note, refined_goal, refined_detail)
+                    VALUES (?, 0, ?, ?, ?, 'complete', ?, ?, ?)
+                    """, arguments: [
+                        UUID().uuidString.lowercased(), now, now, promptUuid,
+                        "Backfilled by m0005; not authored by a bot run.",
+                        pointer, pointer,
+                    ])
+            }
+
+            let missingArchitecture = try Row.fetchAll(db, sql: """
+                SELECT p.uuid AS prompt_uuid, p.ckfs_relative_storage_path AS storage_path
+                  FROM prompt p
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM architecture_summary a WHERE a.prompt_uuid = p.uuid
+                 )
+                """)
+            for row in missingArchitecture {
+                let promptUuid: String = row["prompt_uuid"]
+                let storagePath: String = row["storage_path"]
+                let pointer = """
+                    m0005 placeholder. This prompt predates db-native \
+                    architectures; the real record, if any, is the file at \
+                    \(storagePath)/memory/architecture.md
+                    """
+                try db.execute(sql: """
+                    INSERT INTO architecture_summary
+                        (uuid, version, created_at, updated_at, prompt_uuid,
+                         body, status)
+                    VALUES (?, 0, ?, ?, ?, ?, 'approved')
+                    """, arguments: [
+                        UUID().uuidString.lowercased(), now, now, promptUuid, pointer,
+                    ])
+            }
+
+            try db.execute(
+                sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                arguments: [5, Store.isoNow()]
+            )
+        }
+
+
+        // m0006 — un-backfill the draft prompts m0005 overreached on.
+        //
+        // m0005 gave a placeholder clarification + architecture summary to
+        // EVERY prompt missing one, so that SUMMARY_ABSENT could never again
+        // mean "this prompt is legacy, go read a file". For a prompt that has
+        // moved through the lifecycle that is right. For one still at `draft`
+        // it is not: the placeholders land at terminal status (complete /
+        // approved), and CLARIFY_ASK only accepts rows while the summary is
+        // `building` — with no edge back to `building` from either later
+        // state. A draft prompt would therefore be unable to author its own
+        // clarification, which is precisely the work it exists to do.
+        //
+        // Deleting them restores the correct meaning for that population:
+        // SUMMARY_ABSENT on a draft prompt means "not opened yet — open one",
+        // which is the ordinary non-legacy case and needs no fork. Only rows
+        // m0005 itself wrote are touched (matched on its backstory_note
+        // marker), and only while the prompt is still `draft`, so nothing a
+        // bot authored can be caught by this. The FTS mirrors stay synced
+        // through the live `_ad` delete triggers.
+        //
+        // Landed as its own migration rather than a fix to m0005's body: the
+        // migrator keys on the migration id and silently skips a changed body
+        // on a db that already ran it, so an edit would leave already-migrated
+        // databases diverged from fresh ones forever.
+        migrator.registerMigration("m0006_dropDraftPlaceholderSummaries") { db in
+            let marker = "Backfilled by m0005; not authored by a bot run."
+            try db.execute(sql: """
+                DELETE FROM clarification_summary
+                 WHERE backstory_note = ?
+                   AND prompt_uuid IN (SELECT uuid FROM prompt WHERE status = 'draft')
+                """, arguments: [marker])
+            // The architecture placeholder carries no note column, so it is
+            // identified by the body m0005 wrote plus the same draft filter.
+            try db.execute(sql: """
+                DELETE FROM architecture_summary
+                 WHERE body LIKE 'm0005 placeholder.%'
+                   AND prompt_uuid IN (SELECT uuid FROM prompt WHERE status = 'draft')
+                """)
+            try db.execute(
+                sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                arguments: [6, Store.isoNow()]
             )
         }
 

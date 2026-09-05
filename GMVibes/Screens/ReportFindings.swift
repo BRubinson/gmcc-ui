@@ -83,7 +83,6 @@ extension ReviewVerdict {
         case .approved: ("Approved", .green)
         case .approvedWithNits: ("Approved w/ nits", .yellow)
         case .changesRequested: ("Changes requested", .orange)
-        case .legacyUnstated: ("No verdict (legacy)", .gray)
         }
     }
 }

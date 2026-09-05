@@ -8,11 +8,10 @@ public enum StoreError: Error, Sendable {
     case versionConflict(entity: String, uuid: String, expected: Int64, actual: Int64)
     case invalidTransition(from: PromptStatus, to: PromptStatus, reason: String?)
     case contentLocked(status: PromptStatus)
-    /// The prompt EXISTS but has no clarification/architecture summary — kept
-    /// distinct from notFound because the caller's branch differs materially:
-    /// a legacy prompt means fall back to ckfs artifacts, a current prompt
-    /// means open a summary.
-    case summaryAbsent(entity: String, promptUuid: String, promptIsLegacy: Bool)
+    /// The prompt EXISTS but has no summary of this kind yet — kept distinct
+    /// from notFound because the caller's branch differs materially: open a
+    /// summary, rather than "the uuid is unknown".
+    case summaryAbsent(entity: String, promptUuid: String)
     /// A guarded update with no fields set — rejected instead of burning the
     /// version other editors hold and emitting an empty audit event.
     case emptyUpdate(entity: String)
@@ -39,9 +38,8 @@ public enum StoreError: Error, Sendable {
             return ErrorPayload(
                 code: .invalidTransition,
                 message: "illegal prompt transition \(from.rawValue) → \(to.rawValue)\(suffix)")
-        case .summaryAbsent(let entity, let uuid, let legacy):
-            // The open-verb hint is entity-derived; the message shape for the
-            // clarify/arch entities stays byte-identical to its v7 wording.
+        case .summaryAbsent(let entity, let uuid):
+            // The open-verb hint is entity-derived.
             let verb: String
             switch entity {
             case "clarification": verb = "gm clarify open / gm arch open"
@@ -50,19 +48,9 @@ public enum StoreError: Error, Sendable {
             case "review": verb = "gm review open"
             default: verb = "gm clarify open / gm arch open"
             }
-            // Pre-m0004 prompts can hold their real explore/review report as
-            // an on-disk file even though they are not legacy — the mandatory
-            // migrate pass moves those into rows; steer before "open one"
-            // buries a historical report under a fresh empty summary.
-            let midEraHint = (entity == "exploration" || entity == "review")
-                ? "; if this prompt predates m0004 and has an on-disk report file (gm artifact list --prompt-uuid \(uuid)), run the migrate pass instead"
-                : ""
             return ErrorPayload(
                 code: .summaryAbsent,
-                message: legacy
-                    ? "prompt \(uuid) predates the db-native lifecycle and has no \(entity) — read the ckfs artifact instead (gm artifact list --prompt-uuid \(uuid)); never fabricate backing rows"
-                    : "prompt \(uuid) has no \(entity) yet — open one (\(verb) --prompt-uuid \(uuid))\(midEraHint)",
-                promptIsLegacy: legacy)
+                message: "prompt \(uuid) has no \(entity) yet — open one (\(verb) --prompt-uuid \(uuid))")
         case .contentLocked(let status):
             return ErrorPayload(
                 code: .contentLocked,
@@ -151,25 +139,6 @@ public final class Store: @unchecked Sendable {
 
     static func newUuid() -> String {
         UUID().uuidString.lowercased()
-    }
-
-    /// The lifecycle-v2 epoch: applied_at of m0002's schema_migrations row.
-    /// A prompt whose created_at predates it has no db-native
-    /// clarification/architecture history and never will (the contract
-    /// forbids fabricating backing rows), so forward gates pass vacuously and
-    /// create-on-enter is suppressed for it. Lexicographic comparison is
-    /// chronological — every timestamp comes from isoNow(). Cached per Store
-    /// (the value never changes after the migration runs); reads happen only
-    /// inside dbQueue turns, which serializes access.
-    private var lifecycleEpochCache: String??
-
-    func isLegacyPrompt(_ db: Database, createdAt: String) throws -> Bool {
-        if lifecycleEpochCache == nil {
-            lifecycleEpochCache = .some(try String.fetchOne(
-                db, sql: "SELECT applied_at FROM schema_migrations WHERE version = 2"))
-        }
-        guard let epoch = lifecycleEpochCache ?? nil else { return false }
-        return createdAt < epoch
     }
 
     /// Advance a session's recency WITHOUT bumping its version — deliberately

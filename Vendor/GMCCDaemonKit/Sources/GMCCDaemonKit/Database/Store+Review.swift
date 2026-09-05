@@ -252,15 +252,14 @@ extension Store {
 
     public func reviewGet(_ req: ReviewGetRequest) throws -> ReviewGetResponse {
         try dbQueue.read { db in
-            guard let promptCreatedAt = try String.fetchOne(
-                db, sql: "SELECT created_at FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
-            ) else {
+            guard try String.fetchOne(
+                db, sql: "SELECT uuid FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
+            ) != nil else {
                 throw StoreError.notFound(entity: "prompt", key: req.promptUuid)
             }
             guard let summary = try self.fetchReviewSummary(db, byPrompt: req.promptUuid) else {
                 throw StoreError.summaryAbsent(
-                    entity: "review", promptUuid: req.promptUuid,
-                    promptIsLegacy: try self.isLegacyPrompt(db, createdAt: promptCreatedAt))
+                    entity: "review", promptUuid: req.promptUuid)
             }
             let window = try Store.ratingWindow(full: req.full, min: req.ratingMin, max: req.ratingMax)
             let all = try self.fetchReviewFindings(

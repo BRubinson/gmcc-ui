@@ -23,18 +23,11 @@ struct ExplorationPane: View {
                 ProgressView().controlSize(.small)
                 Text("Loading exploration…").font(.callout).foregroundStyle(.secondary)
             }
-        case .absent(let promptIsLegacy):
-            if promptIsLegacy {
-                Label("This prompt predates the db-native exploration system — its record lives in the ckfs artifacts.",
-                      systemImage: "archivebox")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                Label("Not opened yet — run the bot to start exploration.",
-                      systemImage: "binoculars")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
+        case .absent:
+            Label("Not opened yet — run the bot to start exploration.",
+                  systemImage: "binoculars")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle")
                 .font(.callout)

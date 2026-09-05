@@ -15,20 +15,12 @@ struct ClarificationPane: View {
                 ProgressView().controlSize(.small)
                 Text("Loading clarification…").font(.callout).foregroundStyle(.secondary)
             }
-        case .absent(let promptIsLegacy):
-            // Two different absences (daemon-answered, item 6) — both stay
-            // READ-ONLY: every clarify write is bot/CLI-side by design.
-            if promptIsLegacy {
-                Label("This prompt predates the db-native clarification system — its record lives in the ckfs artifacts.",
-                      systemImage: "archivebox")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                Label("Not opened yet — run the bot to start clarification.",
-                      systemImage: "questionmark.circle")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
+        case .absent:
+            // Stays READ-ONLY: every clarify write is bot/CLI-side by design.
+            Label("Not opened yet — run the bot to start clarification.",
+                  systemImage: "questionmark.circle")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle")
                 .font(.callout)
@@ -149,7 +141,6 @@ struct ClarificationPane: View {
         switch category {
         case .goal: return "Goal"
         case .detail: return "Detail"
-        case .yeetType: return "Type Detection"
         }
     }
 

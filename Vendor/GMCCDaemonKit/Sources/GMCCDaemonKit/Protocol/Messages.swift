@@ -1,18 +1,17 @@
 import Foundation
 
-// Codable wire payloads, one MARK section per message family. All types follow
-// the swift.yeet_template.md lowering conventions: let-only structs,
-// Codable/Hashable/Sendable floor, no force-unwraps. snake_case comes from
+// Codable wire payloads, one MARK section per message family. All types are
+// let-only structs on a Codable/Hashable/Sendable floor, no force-unwraps.
+// snake_case comes from
 // WireCodec's key strategies — types declare NO CodingKeys (the two
 // intentional renames live in Envelope.swift; see WireCodec for the rule).
 // Read-side row DTOs live in Rows.swift.
 
 // MARK: - Identity
 
-/// The identity block wrapped into every domain table (the db analogue of the
-/// has_serial_id / has_uuid / base mixins in gmcc.yeet.yaml). Defined once
-/// here; GRDB records declare these five columns flat because GRDB flattens
-/// only top-level Codable properties into columns.
+/// The identity block wrapped into every domain table. Defined once here;
+/// GRDB records declare these five columns flat because GRDB flattens only
+/// top-level Codable properties into columns.
 public struct BaseEntity: Codable, Hashable, Sendable {
     /// Serial rowid — internal to the db, nil before insert.
     public let id: Int64?
@@ -144,15 +143,16 @@ public enum ClarificationStatus: String, Codable, Hashable, CaseIterable, Sendab
     }
 }
 
-/// Which qualified-prompt section a clarification row belongs to.
+/// Which section of the clarification a question belongs to: the outcome
+/// (`goal`) or the approach (`detail`).
 public enum ClarificationCategory: String, Codable, Hashable, CaseIterable, Sendable {
     case goal
     case detail
-    case yeetType = "yeet_type"
 }
 
 /// Who answered a clarification: the human, or the bot resolving confidently
-/// (a yeet_type detection lands pre-answered as bot_inferred).
+/// (a judgment call the prompt already grants lands pre-answered as
+/// bot_inferred).
 public enum AnswerSource: String, Codable, Hashable, CaseIterable, Sendable {
     case user
     case botInferred = "bot_inferred"
@@ -207,18 +207,6 @@ public enum SessionStatus: String, Codable, Hashable, CaseIterable, Sendable {
     case closed
 }
 
-/// Prompt artifact kinds — pointers to bot-phase memory/ files. Since m0004
-/// every report kind (`explore`, `review`, `qualified`, `architecture`) is
-/// reserved for pre-migration legacy files only; post-m0004 reports are db
-/// rows served by the explore/review/clarify/arch machines.
-public enum ArtifactKind: String, Codable, Hashable, CaseIterable, Sendable {
-    case explore
-    case architecture
-    case review
-    case qualified
-    case other
-}
-
 /// Exploration report lifecycle: exploring → complete, with one backward
 /// revision edge (complete → exploring, the `reopen` verb) — explore is the
 /// most re-run report (resume, team fallback), so re-runs update the same
@@ -271,14 +259,10 @@ public enum ReviewFindingKind: String, Codable, Hashable, CaseIterable, Sendable
 }
 
 /// The review's overall verdict, carried only by REVIEW_COMPLETE.
-/// `legacy_unstated` exists for the verbatim migration of pre-m0004 review
-/// files whose text never states a verdict — inventing one there would
-/// fabricate history.
 public enum ReviewVerdict: String, Codable, Hashable, CaseIterable, Sendable {
     case approved
     case approvedWithNits = "approved_with_nits"
     case changesRequested = "changes_requested"
-    case legacyUnstated = "legacy_unstated"
 }
 
 /// Per-finding resolution, recorded during the fix loop (which runs AFTER the
@@ -891,13 +875,11 @@ public struct PromptSetStatusRequest: Codable, Hashable, Sendable {
 public struct ArtifactAddRequest: Codable, Hashable, Sendable {
     public let promptUuid: String
     public let filePath: String
-    public let kind: ArtifactKind
     public let note: String?
 
-    public init(promptUuid: String, filePath: String, kind: ArtifactKind, note: String? = nil) {
+    public init(promptUuid: String, filePath: String, note: String? = nil) {
         self.promptUuid = promptUuid
         self.filePath = filePath
-        self.kind = kind
         self.note = note
     }
 }

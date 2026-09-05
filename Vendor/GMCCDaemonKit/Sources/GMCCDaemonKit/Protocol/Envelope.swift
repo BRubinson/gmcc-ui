@@ -7,7 +7,7 @@ import Foundation
 /// rejected — the daemon stays up (an old pinned-Kit GMVibes must never be
 /// able to kill-loop a fresh daemon).
 public enum GMCCWireProtocol {
-    public static let version = 9
+    public static let version = 10
 }
 
 /// Discriminator for every NDJSON message on the socket. One case per spec
@@ -203,12 +203,8 @@ public enum ErrorCode: String, Codable, Hashable, CaseIterable, Sendable {
     case invalidTransition = "INVALID_TRANSITION"
     case contentLocked = "CONTENT_LOCKED"
     /// The prompt exists but has no clarification/architecture/exploration/
-    /// review summary. The payload's `promptIsLegacy` says which absence:
-    /// true ⇒ pre-m0002 prompt, read the ckfs artifact; false ⇒ not opened
-    /// yet (for exploration/review a pre-m0004 prompt may instead have an
-    /// on-disk explore.md/review.md — the mandatory migrate pass moves those
-    /// into rows). Plain NOT_FOUND now means only that the uuid itself is
-    /// unknown.
+    /// review summary yet — open one. Plain NOT_FOUND means only that the
+    /// uuid itself is unknown.
     case summaryAbsent = "SUMMARY_ABSENT"
 }
 
@@ -221,9 +217,6 @@ public struct ErrorPayload: Codable, Hashable, Sendable {
     /// Set on PROTOCOL_MISMATCH so clients can be directional too: retry with
     /// autostart only when a freshly built binary would win.
     public let daemonProtocolVersion: Int?
-    /// Set on SUMMARY_ABSENT: machine-readable answer to "is this prompt
-    /// legacy?" so callers never parse the message text.
-    public let promptIsLegacy: Bool?
 
     public var code: ErrorCode? { ErrorCode(rawValue: codeRaw) }
 
@@ -235,14 +228,12 @@ public struct ErrorPayload: Codable, Hashable, Sendable {
         case codeRaw = "code"
         case message
         case daemonProtocolVersion
-        case promptIsLegacy
     }
 
-    public init(code: ErrorCode, message: String, daemonProtocolVersion: Int? = nil, promptIsLegacy: Bool? = nil) {
+    public init(code: ErrorCode, message: String, daemonProtocolVersion: Int? = nil) {
         self.codeRaw = code.rawValue
         self.message = message
         self.daemonProtocolVersion = daemonProtocolVersion
-        self.promptIsLegacy = promptIsLegacy
     }
 }
 

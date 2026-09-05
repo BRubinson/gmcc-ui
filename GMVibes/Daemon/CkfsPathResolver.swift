@@ -3,10 +3,10 @@ import GMCCDaemonKit
 
 /// Filesystem derivations off daemon rows, isolated in one place. Rows carry
 /// ckfs-RELATIVE storage paths; everything here resolves against
-/// $GMCC_CKFS_ROOT. /archive_legacy_yaml_gmcc moves PROMPT folders (not
-/// session dirs) into _archive/cold_storage/<same relative path>, so the
-/// archive mirror is probed at the prompt-folder level, where archiving
-/// actually happens.
+/// $GMCC_CKFS_ROOT. Historical archiving moved PROMPT folders (not session
+/// dirs) into _archive/cold_storage/<same relative path>, so the archive
+/// mirror is probed at the prompt-folder level, where archiving actually
+/// happened.
 ///
 /// All functions perform synchronous FileManager probes — callers resolve
 /// off the main actor and cache the results (never call from a View body).
@@ -61,11 +61,9 @@ nonisolated enum CkfsPathResolver {
     /// row's `ckfs_relative_storage_path` is the ONLY source (probed live,
     /// then in the archive mirror — archiving moves prompt folders, leaving
     /// the session dir live with an emptied prompts/). There is NO folder
-    /// guessing: v8 slugs storage paths at derivation so every new row
-    /// resolves, and the legacy rows (empty path) get no backfill by daemon
-    /// decision — a guessed `<seq>_*` folder can collide with a stranger's
-    /// files (reproduced on the real tree during review), so absence renders
-    /// a non-blocking unavailable state instead.
+    /// guessing: a guessed `<seq>_*` folder can collide with a stranger's
+    /// files, so an empty path renders a non-blocking unavailable state
+    /// instead.
     static func promptFolder(ckfsRoot: String, storagePath: String) -> URL? {
         guard !storagePath.isEmpty else { return nil }
         let live = URL(fileURLWithPath: ckfsRoot, isDirectory: true)
@@ -86,23 +84,15 @@ nonisolated enum CkfsPathResolver {
         /// never describe that directory: only this flag may switch the
         /// explorer from polling to event-driven refresh.
         let isDaemonWatched: Bool
-        /// True when the prompt is legacy and nothing resolved — the memory
-        /// surface renders a non-blocking "unavailable for this legacy
-        /// prompt" state (no storage-path backfill, by daemon decision).
-        let legacyUnavailable: Bool
     }
 
     /// Memory root for a prompt, in priority order:
     /// 1. Deepest common ancestor of the prompt's registered artifact files
-    ///    that exists on disk — db-driven (the rows say where the files are),
-    ///    so it is kept for ALL prompts, legacy included: a legacy prompt
-    ///    with registered artifacts shows real memory.
-    /// 2. The storage-path folder's memory/ subdirectory (post-m0002 rows).
-    /// Root is nil when neither resolves; for a legacy row that absence is
-    /// expected and flagged via `legacyUnavailable`.
+    ///    that exists on disk — db-driven (the rows say where the files are).
+    /// 2. The storage-path folder's memory/ subdirectory.
+    /// Root is nil when neither resolves.
     static func memoryRoot(
         ckfsRoot: String,
-        isLegacy: Bool,
         storagePath: String = "",
         artifacts: [ArtifactRow]
     ) -> ResolvedMemory {
@@ -114,8 +104,7 @@ nonisolated enum CkfsPathResolver {
             ResolvedMemory(
                 root: root,
                 isDaemonWatched: root != nil && watched != nil
-                    && root!.standardizedFileURL.path == watched!.standardizedFileURL.path,
-                legacyUnavailable: isLegacy && root == nil)
+                    && root!.standardizedFileURL.path == watched!.standardizedFileURL.path)
         }
         let parents = artifacts.compactMap { artifact -> URL? in
             let path = artifact.filePath

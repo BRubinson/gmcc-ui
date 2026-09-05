@@ -206,17 +206,15 @@ extension Store {
 
     public func archGet(_ req: ArchGetRequest) throws -> ArchGetResponse {
         try dbQueue.read { db in
-            guard let promptCreatedAt = try String.fetchOne(
-                db, sql: "SELECT created_at FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
-            ) else {
+            guard try String.fetchOne(
+                db, sql: "SELECT uuid FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
+            ) != nil else {
                 throw StoreError.notFound(entity: "prompt", key: req.promptUuid)
             }
             guard let summary = try self.fetchArchitectureSummary(db, byPrompt: req.promptUuid) else {
-                // A6: prompt exists — discriminated SUMMARY_ABSENT (legacy ⇒
-                // read the ckfs artifact; current ⇒ gm arch open).
+                // A6: prompt exists — discriminated SUMMARY_ABSENT (gm arch open).
                 throw StoreError.summaryAbsent(
-                    entity: "architecture", promptUuid: req.promptUuid,
-                    promptIsLegacy: try self.isLegacyPrompt(db, createdAt: promptCreatedAt))
+                    entity: "architecture", promptUuid: req.promptUuid)
             }
             let touched = try self.touchedPaths(db, promptUuid: req.promptUuid)
             let persistence = try self.fetchPersistenceChanges(db, summaryUuid: summary.uuid, touched: touched)

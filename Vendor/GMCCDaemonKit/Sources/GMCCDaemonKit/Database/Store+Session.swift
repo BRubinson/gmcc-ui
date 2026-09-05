@@ -199,7 +199,6 @@ extension Store {
                 status: row["status"],
                 version: row["version"],
                 ckfsRelativeStoragePath: row["ckfs_relative_storage_path"],
-                isLegacy: try isLegacyPrompt(db, createdAt: row["created_at"]),
                 reports: withReports
                     ? PromptReportsStub(
                         clarification: clar[uuid], architecture: arch[uuid],

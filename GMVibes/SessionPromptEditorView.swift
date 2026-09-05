@@ -319,9 +319,6 @@ private struct PromptEditorPane: View {
         /// True when memoryRoot is the exact directory PROMPT_MEMORY_CHANGED
         /// describes (see CkfsPathResolver.ResolvedMemory).
         var memoryIsDaemonWatched = false
-        /// Legacy prompt with nothing resolved (no backfill, by daemon
-        /// decision) — Memories renders a non-blocking unavailable state.
-        var memoryLegacyUnavailable = false
     }
 
     @State private var backstory = ""
@@ -559,9 +556,8 @@ private struct PromptEditorPane: View {
             await load()
             seedPhaseExpansion()
             // Memoized store — a re-selection of an already-loaded prompt
-            // must not re-issue guaranteed round trips (105 legacy prompts
-            // answer NOT_FOUND every time). The event loop below still
-            // refreshes on every real mutation. Explore/review always fetch
+            // must not re-issue guaranteed round trips. The event loop below
+            // still refreshes on every real mutation. Explore/review always fetch
             // (they legally exist at draft); `lifecyclePhases` only skips
             // the two guaranteed-absent clarify/arch trips at draft.
             if !phases.hasLoaded { await phases.refresh(lifecyclePhases: phasesApply) }
@@ -879,15 +875,6 @@ private struct PromptEditorPane: View {
                 promptUuid: stub.uuid,
                 isDaemonWatched: paths.memoryIsDaemonWatched
             )
-        } else if paths.memoryLegacyUnavailable {
-            // Non-blocking by design (item 10): the legacy rows get no
-            // storage-path backfill, and guessing folders is worse than
-            // saying so.
-            ContentUnavailableView(
-                "Memory Unavailable",
-                systemImage: "archivebox",
-                description: Text("This legacy prompt predates per-prompt storage paths — its memory folder can't be located (and it has no registered artifacts).")
-            )
         } else {
             ContentUnavailableView(
                 "No Memory Folder",
@@ -1000,7 +987,6 @@ private struct PromptEditorPane: View {
         let instance = catalog.instance(uuid: windowID.instanceUUID.wireString)
         let project = instance.flatMap { inst in catalog.projects.first { $0.uuid == inst.projectUuid } }
         let artifacts = store.promptDetails[stub.uuid]?.artifacts ?? []
-        let isLegacy = stub.isLegacy
         let storagePath = stub.ckfsRelativeStoragePath
         let resolved: ResolvedPaths = await Task.detached(priority: .userInitiated) {
             var p = ResolvedPaths()
@@ -1017,11 +1003,9 @@ private struct PromptEditorPane: View {
             p.promptFolder = CkfsPathResolver.promptFolder(
                 ckfsRoot: root, storagePath: storagePath)
             let memory = CkfsPathResolver.memoryRoot(
-                ckfsRoot: root, isLegacy: isLegacy,
-                storagePath: storagePath, artifacts: artifacts)
+                ckfsRoot: root, storagePath: storagePath, artifacts: artifacts)
             p.memoryRoot = memory.root
             p.memoryIsDaemonWatched = memory.isDaemonWatched
-            p.memoryLegacyUnavailable = memory.legacyUnavailable
             if let instance {
                 p.instanceFolder = CkfsPathResolver.resolve(
                     relative: instance.ckfsRelativeStoragePath, ckfsRoot: root)

@@ -49,13 +49,10 @@ struct PromptLifecycleBar: View {
         case open
         case blocked(reason: String, fix: String)
         /// The client can't adjudicate: neither the live phase store nor the
-        /// PROMPT_LIST with_reports precomputation has an answer (as of v8
-        /// absence itself is self-describing — is_legacy travels on the stub
-        /// and SUMMARY_ABSENT carries prompt_is_legacy — so this is the rare
-        /// case, not the common one; it still occurs transiently on a `.idle`
-        /// first render whose stub was listed without reports). Offer the
-        /// button; the daemon rules and invalidTransition(reason:) surfaces
-        /// the real message.
+        /// PROMPT_LIST with_reports precomputation has an answer (occurs
+        /// transiently on a `.idle` first render whose stub was listed
+        /// without reports). Offer the button; the daemon rules and
+        /// invalidTransition(reason:) surfaces the real message.
         case unknown
     }
 
@@ -195,9 +192,7 @@ struct PromptLifecycleBar: View {
 
     /// Mirrors Store.setPromptStatus's gate coupling: clarifying→architecting
     /// needs the clarification summary complete; architecting→implementing
-    /// needs the architecture approved. Everything else is edge-only. There
-    /// is deliberately NO legacy exemption on a loaded-but-wrong-status
-    /// summary — the daemon has none either (bypassWhenAbsent only).
+    /// needs the architecture approved. Everything else is edge-only.
     ///
     /// Precedence (three-tier): the LIVE phase store when it has an answer
     /// (.loaded/.absent — it reflects a bot's just-finalized summary), then
@@ -213,12 +208,10 @@ struct PromptLifecycleBar: View {
                 return .blocked(
                     reason: "Clarification is \(phases.clarificationStatus?.rawValue ?? "incomplete")",
                     fix: "finalize it first (gm clarify finalize)")
-            case .absent(let promptIsLegacy):
-                // SUMMARY_ABSENT is self-describing in v8: the daemon
-                // bypasses this gate for legacy prompts; a non-legacy absence
-                // is a real block whose fix is the bot (clarify writes stay
-                // bot/CLI-side).
-                return promptIsLegacy ? .open : .blocked(
+            case .absent:
+                // An absent summary always blocks — the daemon has no bypass;
+                // the fix is the bot (clarify writes stay bot/CLI-side).
+                return .blocked(
                     reason: "No clarification recorded",
                     fix: "run the bot to open clarification")
             case .idle, .failed:
@@ -231,8 +224,8 @@ struct PromptLifecycleBar: View {
                 return .blocked(
                     reason: "Architecture is \(phases.architectureStatus?.rawValue ?? "incomplete")",
                     fix: "approve it first (gm arch approve)")
-            case .absent(let promptIsLegacy):
-                return promptIsLegacy ? .open : .blocked(
+            case .absent:
+                return .blocked(
                     reason: "No architecture recorded",
                     fix: "run the bot to open architecture")
             case .idle, .failed:
@@ -250,7 +243,7 @@ struct PromptLifecycleBar: View {
     private func precomputedClarificationGate() -> Gate {
         guard let reports = stub.reports else { return .unknown }
         guard let clarification = reports.clarification else {
-            return stub.isLegacy ? .open : .blocked(
+            return .blocked(
                 reason: "No clarification recorded",
                 fix: "run the bot to open clarification")
         }
@@ -263,7 +256,7 @@ struct PromptLifecycleBar: View {
     private func precomputedArchitectureGate() -> Gate {
         guard let reports = stub.reports else { return .unknown }
         guard let architecture = reports.architecture else {
-            return stub.isLegacy ? .open : .blocked(
+            return .blocked(
                 reason: "No architecture recorded",
                 fix: "run the bot to open architecture")
         }

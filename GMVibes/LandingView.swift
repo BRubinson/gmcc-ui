@@ -26,7 +26,7 @@ struct LandingView: View {
                     // re-baseline) must never masquerade as an empty app.
                     CatalogErrorState(error: error)
                 } else if catalog.hasLoaded && catalog.projects.isEmpty {
-                    MigrationGateState()
+                    EmptyDatabaseState()
                 } else {
                     launcher
                 }
@@ -375,7 +375,7 @@ private struct DaemonGateState: View {
     }
 }
 
-private struct MigrationGateState: View {
+private struct EmptyDatabaseState: View {
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "tray.and.arrow.down")
@@ -383,15 +383,14 @@ private struct MigrationGateState: View {
                 .foregroundStyle(.blue)
             Text("GMCC database is empty")
                 .font(.title2.weight(.semibold))
-            Text("The daemon is healthy but holds no projects yet. Import the legacy ckfs yamls from a gmcc marketplace session, then archive them:")
+            Text("The daemon is healthy but holds no projects yet. Start a Claude Code session in a gmcc-enabled repo (the SessionStart hook registers it), or ensure the context manually:")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 480)
 
             VStack(spacing: 10) {
-                CommandCopyRow(command: "/gmcc:import_legacy_yaml_gmcc")
-                CommandCopyRow(command: "/gmcc:archive_legacy_yaml_gmcc")
+                CommandCopyRow(command: "gm context ensure")
             }
             .frame(maxWidth: 480)
         }

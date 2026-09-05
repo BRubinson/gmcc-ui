@@ -7,10 +7,9 @@ import GMCCDaemonKit
 /// (read-only by clarified scope; every write verb stays bot/CLI-side).
 ///
 /// Memoized on `SessionScope` beside the save actors so N panes on one prompt
-/// cost one fetch. SUMMARY_ABSENT is the NORMAL state for most prompts (89
-/// done + 18 draft legacy rows predate m0002) — it publishes `.absent`, never
-/// an error banner. Plain NOT_FOUND means the prompt uuid itself is unknown —
-/// a real failure, never absence.
+/// cost one fetch. SUMMARY_ABSENT is a NORMAL state (the summary was never
+/// opened) — it publishes `.absent`, never an error banner. Plain NOT_FOUND
+/// means the prompt uuid itself is unknown — a real failure, never absence.
 ///
 /// Live refresh needs no registration: as of wire v8 every phase-change
 /// payload (CLARIFICATION/ARCHITECTURE/EXPLORATION/REVIEW_CHANGE) carries
@@ -21,10 +20,9 @@ import GMCCDaemonKit
 final class PromptPhaseStore {
     enum Phase<T: Equatable>: Equatable {
         case idle
-        /// No summary row exists (SUMMARY_ABSENT). The daemon says which
-        /// absence: legacy (pre-m0002/m0004, ckfs artifacts are the record)
-        /// or simply never opened — surfaces render the two differently.
-        case absent(promptIsLegacy: Bool)
+        /// No summary row exists (SUMMARY_ABSENT) — the summary was simply
+        /// never opened.
+        case absent
         case loaded(T)
         case failed(String)
     }
@@ -153,8 +151,8 @@ final class PromptPhaseStore {
     private func fetchClarification() async -> Phase<ClarifyGetResponse> {
         do {
             return .loaded(try await service.clarification(promptUuid: promptUuid))
-        } catch DaemonError.summaryAbsent(let promptIsLegacy) {
-            return .absent(promptIsLegacy: promptIsLegacy)
+        } catch DaemonError.summaryAbsent {
+            return .absent
         } catch let error as DaemonError {
             return .failed(error.userMessage)
         } catch {
@@ -165,8 +163,8 @@ final class PromptPhaseStore {
     private func fetchArchitecture() async -> Phase<ArchGetResponse> {
         do {
             return .loaded(try await service.architecture(promptUuid: promptUuid))
-        } catch DaemonError.summaryAbsent(let promptIsLegacy) {
-            return .absent(promptIsLegacy: promptIsLegacy)
+        } catch DaemonError.summaryAbsent {
+            return .absent
         } catch let error as DaemonError {
             return .failed(error.userMessage)
         } catch {
@@ -177,8 +175,8 @@ final class PromptPhaseStore {
     private func fetchExploration(full: Bool) async -> Phase<ExploreGetResponse> {
         do {
             return .loaded(try await service.exploration(promptUuid: promptUuid, full: full))
-        } catch DaemonError.summaryAbsent(let promptIsLegacy) {
-            return .absent(promptIsLegacy: promptIsLegacy)
+        } catch DaemonError.summaryAbsent {
+            return .absent
         } catch let error as DaemonError {
             return .failed(error.userMessage)
         } catch {
@@ -189,8 +187,8 @@ final class PromptPhaseStore {
     private func fetchReview(full: Bool) async -> Phase<ReviewGetResponse> {
         do {
             return .loaded(try await service.review(promptUuid: promptUuid, full: full))
-        } catch DaemonError.summaryAbsent(let promptIsLegacy) {
-            return .absent(promptIsLegacy: promptIsLegacy)
+        } catch DaemonError.summaryAbsent {
+            return .absent
         } catch let error as DaemonError {
             return .failed(error.userMessage)
         } catch {

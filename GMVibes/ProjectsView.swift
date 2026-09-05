@@ -108,7 +108,7 @@ private struct ProjectTreeView: View {
         if !query.isEmpty { return "No matches." }
         if daemon.health != .up { return "GMCC daemon unavailable." }
         if let error = catalog.lastError { return error }
-        return "No projects in the GMCC database yet — run /import_legacy_yaml_gmcc."
+        return "No projects in the GMCC database yet — start a session in a gmcc-enabled repo (gm context ensure)."
     }
 }
 

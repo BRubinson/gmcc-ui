@@ -189,27 +189,20 @@ extension Store {
                         : "legal next from \(from.rawValue): "
                             + from.allowedNext.map(\.rawValue).sorted().joined(separator: ", "))
             }
-            let legacy = try self.isLegacyPrompt(db, createdAt: head["created_at"])
             switch (from, req.status) {
             case (.draft, .clarifying):
-                if !legacy {
-                    _ = try self.ensureClarificationSummary(db, promptUuid: req.promptUuid)
-                }
+                _ = try self.ensureClarificationSummary(db, promptUuid: req.promptUuid)
             case (.clarifying, .architecting):
                 try self.requireSummaryStatus(
                     db, table: "clarification_summary", entity: "clarification",
                     promptUuid: req.promptUuid,
-                    expected: ClarificationStatus.complete.rawValue,
-                    bypassWhenAbsent: legacy)
-                if !legacy {
-                    _ = try self.ensureArchitectureSummary(db, promptUuid: req.promptUuid)
-                }
+                    expected: ClarificationStatus.complete.rawValue)
+                _ = try self.ensureArchitectureSummary(db, promptUuid: req.promptUuid)
             case (.architecting, .implementing):
                 try self.requireSummaryStatus(
                     db, table: "architecture_summary", entity: "architecture",
                     promptUuid: req.promptUuid,
-                    expected: ArchitectureStatus.approved.rawValue,
-                    bypassWhenAbsent: legacy)
+                    expected: ArchitectureStatus.approved.rawValue)
             default:
                 break // implementing → {reviewing, done}, reviewing → done: ungated
             }
@@ -229,21 +222,17 @@ extension Store {
     }
 
     /// Gate check shared by the lifecycle transitions: the backing summary
-    /// must exist at the expected status. Absence is tolerated only for
-    /// legacy prompts (missing-backing-rows tolerance covers forward
-    /// transitions for pre-m0002 data — never for prompts created since).
+    /// must exist at the expected status.
     private func requireSummaryStatus(
         _ db: Database,
         table: String,
         entity: String,
         promptUuid: String,
-        expected: String,
-        bypassWhenAbsent: Bool
+        expected: String
     ) throws {
         guard let actual = try String.fetchOne(
             db, sql: "SELECT status FROM \(table) WHERE prompt_uuid = ?", arguments: [promptUuid]
         ) else {
-            if bypassWhenAbsent { return }
             throw StoreError.invalidEntityTransition(
                 entity: "prompt", from: "gate", to: expected,
                 reason: "no \(entity) summary exists for prompt \(promptUuid)")
@@ -280,7 +269,6 @@ extension Store {
             command: row["command"],
             status: row["status"],
             ckfsRelativeStoragePath: row["ckfs_relative_storage_path"],
-            isLegacy: try isLegacyPrompt(db, createdAt: row["created_at"]),
             createdAt: row["created_at"],
             updatedAt: row["updated_at"]
         )

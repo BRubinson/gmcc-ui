@@ -13,7 +13,7 @@ extension Store {
                 throw StoreError.notFound(entity: "prompt", key: req.promptUuid)
             }
             // UNIQUE(prompt_uuid, file_path): re-registering the same file
-            // updates its kind/note instead of failing.
+            // updates its note instead of failing.
             if let existing = try String.fetchOne(
                 db,
                 sql: "SELECT uuid FROM prompt_artifact WHERE prompt_uuid = ? AND file_path = ?",
@@ -22,13 +22,13 @@ extension Store {
                 try db.execute(
                     sql: """
                         UPDATE prompt_artifact
-                        SET kind = ?, note = ?, version = version + 1, updated_at = ?
+                        SET note = ?, version = version + 1, updated_at = ?
                         WHERE uuid = ?
                         """,
-                    arguments: [req.kind.rawValue, req.note, Store.isoNow(), existing])
+                    arguments: [req.note, Store.isoNow(), existing])
                 try self.appendEvent(
                     db, kind: .addArtifact, subjectUuid: existing,
-                    payload: Store.jsonPayload(["file_path": req.filePath, "kind": req.kind.rawValue]))
+                    payload: Store.jsonPayload(["file_path": req.filePath]))
                 guard let row = try self.fetchArtifactRow(db, uuid: existing) else {
                     throw StoreError.notFound(entity: "prompt_artifact", key: existing)
                 }
@@ -37,12 +37,11 @@ extension Store {
             let uuid = try self.insertBase(db, table: "prompt_artifact", extra: [
                 "prompt_uuid": req.promptUuid,
                 "file_path": req.filePath,
-                "kind": req.kind.rawValue,
                 "note": req.note,
             ])
             try self.appendEvent(
                 db, kind: .addArtifact, subjectUuid: uuid,
-                payload: Store.jsonPayload(["file_path": req.filePath, "kind": req.kind.rawValue]))
+                payload: Store.jsonPayload(["file_path": req.filePath]))
             guard let row = try self.fetchArtifactRow(db, uuid: uuid) else {
                 throw StoreError.notFound(entity: "prompt_artifact", key: uuid)
             }
@@ -62,7 +61,7 @@ extension Store {
         guard let row = try Row.fetchOne(
             db,
             sql: """
-                SELECT uuid, prompt_uuid, file_path, kind, note, created_at
+                SELECT uuid, prompt_uuid, file_path, note, created_at
                 FROM prompt_artifact WHERE uuid = ?
                 """,
             arguments: [uuid]
@@ -71,7 +70,6 @@ extension Store {
             uuid: row["uuid"],
             promptUuid: row["prompt_uuid"],
             filePath: row["file_path"],
-            kind: row["kind"],
             note: row["note"],
             createdAt: row["created_at"]
         )
@@ -81,7 +79,7 @@ extension Store {
         try Row.fetchAll(
             db,
             sql: """
-                SELECT uuid, prompt_uuid, file_path, kind, note, created_at
+                SELECT uuid, prompt_uuid, file_path, note, created_at
                 FROM prompt_artifact WHERE prompt_uuid = ? ORDER BY created_at, id
                 """,
             arguments: [promptUuid]
@@ -90,7 +88,6 @@ extension Store {
                 uuid: row["uuid"],
                 promptUuid: row["prompt_uuid"],
                 filePath: row["file_path"],
-                kind: row["kind"],
                 note: row["note"],
                 createdAt: row["created_at"]
             )

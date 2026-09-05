@@ -2,8 +2,7 @@
 
 A native macOS app for browsing and managing the **GMCC** (Green Mountain
 Compiler Collection) contextual knowledge file system — projects, sessions,
-knowledge bites (kbites), and `yeet` documents — with a modern SwiftUI
-interface.
+prompts, and knowledge bites (kbites) — with a modern SwiftUI interface.
 
 GM Vibes is the desktop companion to the GMCC plugin. It reads the same
 `GMCC_*` environment and ckfs layout that the GM-CDE toolchain produces, so what

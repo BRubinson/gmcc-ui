@@ -13,8 +13,7 @@ extension Store {
 
     /// Idempotent: returns the existing summary or creates one at `building`.
     /// Called by CLARIFY_OPEN and by setPromptStatus's draft → clarifying
-    /// create-on-enter (suppressed there for legacy prompts; calling OPEN on a
-    /// legacy prompt is the explicit adoption path).
+    /// create-on-enter.
     @discardableResult
     func ensureClarificationSummary(_ db: Database, promptUuid: String) throws -> (uuid: String, created: Bool) {
         guard try Row.fetchOne(
@@ -67,8 +66,8 @@ extension Store {
             guard !question.isEmpty else {
                 throw StoreError.badRequest(detail: "question is empty")
             }
-            // Pre-answered insert (the confidently-resolved yeet_type path):
-            // an answer requires a source; CHECK guarantees answered ⇒ answer.
+            // Pre-answered insert (the bot_inferred path): an answer
+            // requires a source; CHECK guarantees answered ⇒ answer.
             let answer = req.answer?.trimmingCharacters(in: .whitespacesAndNewlines)
             let status: String
             var source: String?
@@ -226,19 +225,16 @@ extension Store {
 
     public func clarifyGet(_ req: ClarifyGetRequest) throws -> ClarifyGetResponse {
         try dbQueue.read { db in
-            guard let promptCreatedAt = try String.fetchOne(
-                db, sql: "SELECT created_at FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
-            ) else {
+            guard try String.fetchOne(
+                db, sql: "SELECT uuid FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
+            ) != nil else {
                 throw StoreError.notFound(entity: "prompt", key: req.promptUuid)
             }
             guard let summary = try self.fetchClarificationSummary(db, byPrompt: req.promptUuid) else {
                 // A6: the prompt EXISTS (guard above) — this absence is a
-                // discriminated SUMMARY_ABSENT, not NOT_FOUND. promptIsLegacy
-                // tells the caller its branch: legacy ⇒ read the ckfs artifact
-                // (never fabricate rows); current ⇒ open a summary.
+                // discriminated SUMMARY_ABSENT, not NOT_FOUND: open a summary.
                 throw StoreError.summaryAbsent(
-                    entity: "clarification", promptUuid: req.promptUuid,
-                    promptIsLegacy: try self.isLegacyPrompt(db, createdAt: promptCreatedAt))
+                    entity: "clarification", promptUuid: req.promptUuid)
             }
             let rows = try self.fetchClarificationRows(db, summaryUuid: summary.uuid)
             return ClarifyGetResponse(summary: summary, clarifications: rows)

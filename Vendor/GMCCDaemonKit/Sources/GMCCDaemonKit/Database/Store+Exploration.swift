@@ -222,15 +222,14 @@ extension Store {
 
     public func exploreGet(_ req: ExploreGetRequest) throws -> ExploreGetResponse {
         try dbQueue.read { db in
-            guard let promptCreatedAt = try String.fetchOne(
-                db, sql: "SELECT created_at FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
-            ) else {
+            guard try String.fetchOne(
+                db, sql: "SELECT uuid FROM prompt WHERE uuid = ?", arguments: [req.promptUuid]
+            ) != nil else {
                 throw StoreError.notFound(entity: "prompt", key: req.promptUuid)
             }
             guard let summary = try self.fetchExplorationSummary(db, byPrompt: req.promptUuid) else {
                 throw StoreError.summaryAbsent(
-                    entity: "exploration", promptUuid: req.promptUuid,
-                    promptIsLegacy: try self.isLegacyPrompt(db, createdAt: promptCreatedAt))
+                    entity: "exploration", promptUuid: req.promptUuid)
             }
             let keyFiles = try self.fetchExplorationKeyFiles(
                 db, where: "exploration_summary_uuid = ?", arguments: [summary.uuid])

@@ -160,10 +160,6 @@ public struct PromptRow: Codable, Hashable, Sendable {
     public let command: String
     public let status: String
     public let ckfsRelativeStoragePath: String
-    /// True when the prompt predates the m0002 lifecycle epoch — it
-    /// legitimately has no clarification/architecture rows and never will.
-    /// Computed at materialization against the epoch cache, never stored.
-    public let isLegacy: Bool
     public let createdAt: String
     public let updatedAt: String
 
@@ -182,7 +178,6 @@ public struct PromptRow: Codable, Hashable, Sendable {
         command: String,
         status: String,
         ckfsRelativeStoragePath: String,
-        isLegacy: Bool,
         createdAt: String,
         updatedAt: String
     ) {
@@ -198,7 +193,6 @@ public struct PromptRow: Codable, Hashable, Sendable {
         self.command = command
         self.status = status
         self.ckfsRelativeStoragePath = ckfsRelativeStoragePath
-        self.isLegacy = isLegacy
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -217,9 +211,6 @@ public struct PromptStub: Codable, Hashable, Sendable {
     public let status: String
     public let version: Int64
     public let ckfsRelativeStoragePath: String
-    /// True when the prompt predates the m0002 lifecycle epoch (see
-    /// PromptRow.isLegacy).
-    public let isLegacy: Bool
     /// Present only when PROMPT_LIST was called with `with_reports` — nested
     /// so "not requested" (nil) and "requested, none exists" (present with
     /// nil members) stay distinguishable.
@@ -236,7 +227,6 @@ public struct PromptStub: Codable, Hashable, Sendable {
         status: String,
         version: Int64,
         ckfsRelativeStoragePath: String,
-        isLegacy: Bool,
         reports: PromptReportsStub? = nil,
         createdAt: String,
         updatedAt: String
@@ -249,7 +239,6 @@ public struct PromptStub: Codable, Hashable, Sendable {
         self.status = status
         self.version = version
         self.ckfsRelativeStoragePath = ckfsRelativeStoragePath
-        self.isLegacy = isLegacy
         self.reports = reports
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -257,9 +246,7 @@ public struct PromptStub: Codable, Hashable, Sendable {
 }
 
 /// The PROMPT_LIST `with_reports` enrichment block: one summary stub per
-/// report machine. A nil member means that summary was never opened —
-/// combined with `isLegacy` that is exactly the SUMMARY_ABSENT
-/// discrimination, surfaced in a listing.
+/// report machine. A nil member means that summary was never opened.
 public struct PromptReportsStub: Codable, Hashable, Sendable {
     public let clarification: ClarificationReportStub?
     public let architecture: ArchitectureReportStub?
@@ -451,17 +438,13 @@ public struct ArtifactRow: Codable, Hashable, Sendable {
     public let uuid: String
     public let promptUuid: String
     public let filePath: String
-    public let kind: String
     public let note: String?
     public let createdAt: String
 
-    public var artifactKind: ArtifactKind? { ArtifactKind(rawValue: kind) }
-
-    public init(uuid: String, promptUuid: String, filePath: String, kind: String, note: String?, createdAt: String) {
+    public init(uuid: String, promptUuid: String, filePath: String, note: String?, createdAt: String) {
         self.uuid = uuid
         self.promptUuid = promptUuid
         self.filePath = filePath
-        self.kind = kind
         self.note = note
         self.createdAt = createdAt
     }
