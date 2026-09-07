@@ -24,6 +24,12 @@ final class InvalidationHub {
         case memories(String)
         /// PATHS_GET inputs changed (CONFIG_SET) — the env should refetch.
         case paths
+        /// DOPE_CHANGE for one session's dope surfaces. Deliberately NOT
+        /// `.session`: SessionStore.refresh is coalesced but not debounced, and
+        /// a bot's N-node dope write would fire N SESSION_GET + PROMPT_LIST +
+        /// prefetch passes on the serial daemon queue. Dope stores subscribe
+        /// here; the scope uuid rides the payload for them to narrow on.
+        case dope(String)
     }
 
     private var continuations: [Domain: [UUID: AsyncStream<Void>.Continuation]] = [:]
@@ -67,6 +73,16 @@ final class InvalidationHub {
     func invalidateAllPrompts() {
         for (domain, conts) in continuations {
             if case .prompt = domain {
+                conts.values.forEach { $0.yield() }
+            }
+        }
+    }
+
+    /// Mirror of invalidateAllSessions for DOPE_CHANGE rows whose payload
+    /// carries no session_uuid (defensive — recordDopeChange always writes it).
+    func invalidateAllDope() {
+        for (domain, conts) in continuations {
+            if case .dope = domain {
                 conts.values.forEach { $0.yield() }
             }
         }

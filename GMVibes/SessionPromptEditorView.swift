@@ -2,42 +2,33 @@ import SwiftUI
 import AppKit
 import GMCCDaemonKit
 
-// Per-session prompt-authoring screen. Left: a flat navigator of the session's
-// prompts (SESSION_GET / PROMPT_LIST stubs). Right: a three-section code-style
-// editor (backstory / goal / detail) over the selected prompt's daemon row, with
-// version-threaded autosave, in-memory undo/redo, per-section copy, and a
-// toolbar "Run" button that exports the `/gm_bot {seq}` resume command.
+// The PROMPT-EDITOR screen (`Route.sessionPrompt`) — one level below the
+// session view. Left: a prompts-only navigator (SESSION_GET / PROMPT_LIST
+// stubs). Right: a three-section code-style editor (backstory / goal / detail)
+// over the selected prompt's daemon row, with version-threaded autosave,
+// in-memory undo/redo, per-section copy, and a toolbar "Run" button that
+// exports the `/gm_bot {seq}` resume command. Drawings/dope tabs live
+// on the SESSION view (SessionScreen); prompt switching here is in-screen so
+// the editor keeps its fast .id(stub.uuid) recreation path.
 
-/// Which sidebar list is showing. Two Lists with independent selection
-/// bindings — the prompt List and its four selection-recovery rules stay
-/// untouched, and each tab remembers its own selection.
-enum SidebarTab: String, CaseIterable, Identifiable, Hashable {
-    case prompts, drawings
-    var id: String { rawValue }
-    var title: String { rawValue.capitalized }
-}
-
-struct SessionPromptEditorView: View {
+struct SessionPromptScreen: View {
     @Environment(DaemonConnectionModel.self) private var daemon
     @Environment(CatalogStore.self) private var catalog
     @Environment(WindowNav.self) private var nav
-    @Environment(DrawingsStore.self) private var drawingsStore
-    @Environment(\.openWindow) private var openWindow
     let windowID: SessionWindowID
 
     @State private var scope: SessionScope
     @State private var selectedUuid: String?
     @State private var didDefaultSelect = false
     @State private var showCreatePrompt = false
+    @State private var showSessionDope = false
     // One list filter over both fields: name + content (all sections).
     @State private var promptQuery = ""
-    @State private var tab: SidebarTab = .prompts
-    @State private var selectedDrawingID: UUID?
     // Per-prompt undo/redo controllers, surviving the detail pane's teardown
-    // (tab flips AND prompt reselection — the pane's .id() recreation used to
-    // discard the stack). A plain reference box, not @Observable, so
-    // create-or-get from body mutates nothing SwiftUI tracks. Dies with the
-    // screen on route change, same as the old pane-local state.
+    // (prompt reselection — the pane's .id() recreation used to discard the
+    // stack). A plain reference box, not @Observable, so create-or-get from
+    // body mutates nothing SwiftUI tracks. Dies with the screen on route
+    // change, same as the old pane-local state.
     @State private var editHistories = EditHistoryBox()
 
     private var store: SessionStore { scope.store }
@@ -45,12 +36,15 @@ struct SessionPromptEditorView: View {
     init(windowID: SessionWindowID) {
         self.windowID = windowID
         // Create-or-get is side-effect-safe in init; the refcount lease lives
-        // in onAppear/onDisappear, which SwiftUI balances.
+        // at the WINDOW root (keyed on Route.sessionScopeUuid), so navigating
+        // session ↔ sessionPrompt can never retire the scope. The screen-local
+        // lease below is belt-and-braces for embedded hosts (InstanceScreen).
         _scope = State(initialValue: SessionScopeCache.shared.scope(for: windowID.sessionUUID.wireString))
-        // Deep-link seed. Seeding in init (not onAppear) beats the newest-prompt
-        // default with no visible flash AND covers the grace-revived case, where
-        // prompts are already loaded so onChange(of: prompts) never fires.
-        // didDefaultSelect is pre-spent so the default rule can't overwrite it.
+        // Deep-link seed: the route payload IS the deep link. Seeding in init
+        // (not onAppear) beats the newest-prompt default with no visible flash
+        // AND covers the grace-revived case, where prompts are already loaded
+        // so onChange(of: prompts) never fires. didDefaultSelect is pre-spent
+        // so the default rule can't overwrite it.
         let target = windowID.targetPromptUUID?.wireString
         _selectedUuid = State(initialValue: target)
         _didDefaultSelect = State(initialValue: target != nil)
@@ -64,16 +58,11 @@ struct SessionPromptEditorView: View {
         guard let instance = instanceRow else { return nil }
         return catalog.projects.first { $0.uuid == instance.projectUuid }
     }
-
-    // Window-lived, session-keyed drawing state (create-or-get is
-    // side-effect-safe from body — the SessionScopeCache.scope contract).
-    private var book: DrawingBook { drawingsStore.book(for: windowID.sessionUUID.wireString) }
-    private var selectedDrawing: Drawing? { book.drawing(id: selectedDrawingID) }
-    private var filteredDrawings: [Drawing] {
-        let q = SearchQuery(promptQuery)
-        guard q.isActive else { return book.drawings }
-        // displayTitle, not title — an untitled drawing must not vanish mid-search.
-        return book.drawings.filter { q.matchesAny([$0.displayTitle]) }
+    /// Live session name: the route payload's copy is frozen at navigation
+    /// time, so a rename would never reach the sidebar header without this
+    /// catalog resolution (UPDATE_SESSION → .topology keeps it fresh).
+    private var sessionDisplayName: String {
+        catalog.session(uuid: windowID.sessionUUID.wireString)?.name ?? windowID.sessionName
     }
 
     // Newest first — "default newest" selection + natural authoring order.
@@ -94,59 +83,79 @@ struct SessionPromptEditorView: View {
     }
 
     var body: some View {
-        // NavigationSplitView, deliberately: its columns OWN their toolbar /
-        // navigationTitle / .task lifecycles, which the pane's per-prompt
-        // recreation (.id(stub.uuid)) depends on. The earlier HSplitView
-        // attempt broke exactly that — toolbar items declared inside HSplitView
-        // children leak on teardown (the header grew a duplicate icon set per
-        // reselection) and the child re-hosting reset pane @State, restarting
-        // load() forever. The "one continuous header" goal is met differently:
-        // the sidebar column declares GlobalToolbarGroup below, which macOS
-        // renders in the toolbar's SIDEBAR section — leading edge, level with
-        // the window controls — while GMVibesWindow skips its own declaration
-        // on this route.
-        NavigationSplitView {
-            PromptNavigator(
-                sessionName: windowID.sessionName,
-                instanceName: instanceRow?.name ?? "—",
-                repositoryName: projectRow?.gitRepoName,
-                systemPath: instanceRow.map(\.absoluteFileSystemPath),
-                changeSummary: store.changeSummary,
-                prompts: filteredPrompts,
-                query: $promptQuery,
-                selectedUuid: $selectedUuid,
-                tab: $tab,
-                drawings: filteredDrawings,
-                selectedDrawingID: $selectedDrawingID,
-                newLabel: tab == .prompts ? "New Prompt" : "New Drawing",
-                newDisabled: tab == .prompts && store.session == nil,
-                onNew: {
-                    switch tab {
-                    case .prompts:
-                        showCreatePrompt = true
-                    case .drawings:
-                        // No sheet: CreatePromptView exists for the daemon
-                        // round trip; a drawing has none — create and select.
-                        selectedDrawingID = book.create().id
+        // ScreenScaffold's sidebar shape (NavigationSplitView), deliberately:
+        // its columns OWN their toolbar / navigationTitle / .task lifecycles,
+        // which the pane's per-prompt recreation (.id(stub.uuid)) depends on.
+        // The earlier HSplitView attempt broke exactly that — toolbar items
+        // declared inside HSplitView children leak on teardown and the child
+        // re-hosting reset pane @State, restarting load() forever. The global
+        // group comes from GMVibesWindow with `.navigation` placement.
+        //
+        // title: nil — PromptEditorPane declares its OWN navigationTitle
+        // (prompt name) + subtitle (status); a scaffold title here sits
+        // OUTSIDE the content and would win the preference race, wiping
+        // both. The empty-state branches title themselves instead.
+        ScreenScaffold {
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Text("Prompts")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    // The session-base dope model, WITHOUT leaving the editor.
+                    // The prompt-scope card is already on screen below, so
+                    // this deliberately targets SESSION_BASE (promptUuid: nil).
+                    Button { showSessionDope.toggle() } label: {
+                        Label("Session Dope", systemImage: "cube.transparent")
+                            .labelStyle(.iconOnly)
                     }
-                },
-                onSearchSession: {
-                    nav.go(.search(SearchSeed(sessionUuid: windowID.sessionUUID.wireString)))
+                    .buttonStyle(.borderless)
+                    .help("Session-base dope model — scope picker and search included")
+                    .popover(isPresented: $showSessionDope, arrowEdge: .trailing) {
+                        // DopePane frames to .infinity; a bare popover proposes
+                        // nothing, so the explicit frame is load-bearing. The
+                        // environment is re-injected per the GmccDaemonStatus
+                        // precedent.
+                        DopePane(scope: scope, promptUuid: nil)
+                            .environment(daemon)
+                            .frame(width: 760, height: 560)
+                    }
+                    Button { showCreatePrompt = true } label: {
+                        Label("New Prompt", systemImage: "plus")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(store.session == nil)
+                    .help("New Prompt")
+                    Button {
+                        nav.go(.search(SearchSeed(sessionUuid: windowID.sessionUUID.wireString)))
+                    } label: {
+                        Label("Search Session", systemImage: "magnifyingglass")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Full-text search, scoped to this session")
                 }
-            )
-            .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
-            // The app-wide leading group, hosted by the SIDEBAR column with
-            // default placement so it lands left of the column divider (see
-            // GlobalToolbarGroup's doc); GMVibesWindow declares it on every
-            // route EXCEPT this one.
-            .toolbar {
-                GlobalToolbarGroup(nav: nav, openWindow: openWindow,
-                                   placement: .automatic)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                SessionPromptListSidebar(
+                    sessionName: sessionDisplayName,
+                    instanceName: instanceRow?.name ?? "—",
+                    repositoryName: projectRow?.gitRepoName,
+                    systemPath: instanceRow.map(\.absoluteFileSystemPath),
+                    changeSummary: store.changeSummary,
+                    prompts: filteredPrompts,
+                    searching: !promptQuery.isEmpty,
+                    selectedUuid: $selectedUuid
+                )
             }
-        } detail: {
+            .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+            // The sidebar filter's writer (name + prefetched content match).
+            .searchable(text: $promptQuery, placement: .sidebar,
+                        prompt: "Filter prompts")
+        } content: {
             detailContent
         }
-        .navigationTitle(windowID.sessionName)
         .frame(minWidth: 760, minHeight: 480)
         .sheet(isPresented: $showCreatePrompt) {
             CreatePromptView(
@@ -161,27 +170,6 @@ struct SessionPromptEditorView: View {
             } else if !didDefaultSelect, selectedUuid == nil, let first = new.first {
                 selectedUuid = first.uuid
                 didDefaultSelect = true
-            }
-        }
-        // Repeat deep-link into this already-open screen: `go`'s route-equality
-        // guard means no re-init, so the retarget arrives on the one-shot
-        // pending channel instead. Consuming clears it (the nil re-fire is
-        // guarded), keeping the channel armed for the next identical hit.
-        .onChange(of: nav.pendingPromptTarget) { _, target in
-            guard let target else { return }
-            selectedUuid = target.wireString
-            didDefaultSelect = true
-            // A user-initiated jump to a prompt must not land invisibly behind
-            // the Drawings tab. Only THIS user-initiated retarget switches the
-            // tab — the automatic recovery rules deliberately do not.
-            tab = .prompts
-            nav.pendingPromptTarget = nil
-        }
-        .onAppear {
-            // The init path already consumed this screen's own seed — clear it
-            // so a later identical hit registers as a fresh change.
-            if nav.pendingPromptTarget == windowID.targetPromptUUID {
-                nav.pendingPromptTarget = nil
             }
         }
         // Event-driven refresh: SESSION_GET on session invalidations. The
@@ -213,230 +201,53 @@ struct SessionPromptEditorView: View {
                 await catalog.refresh()
             }
         }
-        // The scope lease. `.task` is contractually balanced against view
-        // lifetime (unlike onAppear/onDisappear), so acquire/release can never
-        // go unpaired and retire a scope another window still holds. Keyed on
-        // the session uuid — NOT daemon.generation — so a reconnect resync
-        // doesn't drop and re-acquire the lease.
-        .task(id: scope.sessionUuid) {
-            SessionScopeCache.shared.acquire(scope.sessionUuid)
-            defer { SessionScopeCache.shared.release(scope.sessionUuid) }
-            // Hold until cancellation; the refresh loops live in their own
-            // generation-keyed tasks.
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3600))
-            }
+        // No screen-local scope lease: the WINDOW holds it (GMVibesWindow,
+        // keyed on Route.sessionScopeUuid), and the `.sessionPrompt` route
+        // arm is this screen's only construction site — the InstanceScreen
+        // embed that once justified a local lease was deleted by the
+        // instance-page inversion.
+        //
+        // Route-equal repeat deep link: `go` short-circuits (no re-init), so
+        // the retarget arrives on the one-shot channel. Consuming clears it
+        // (the nil re-fire is guarded), keeping it armed for the next
+        // identical hit.
+        .onChange(of: nav.pendingPromptTarget) { _, target in
+            guard let target else { return }
+            selectedUuid = target.wireString
+            didDefaultSelect = true
+            nav.pendingPromptTarget = nil
         }
     }
 
     @ViewBuilder
     private var detailContent: some View {
-        switch tab {
-            case .prompts:
-                if let stub = selectedStub {
-                    PromptEditorPane(
-                        stub: stub,
-                        scope: scope,
-                        windowID: windowID,
-                        history: editHistories.history(for: stub.uuid)
-                    )
-                    // Recreate the pane (fresh editor) per prompt; the undo
-                    // controller is injected and outlives the recreation.
-                    .id(stub.uuid)
-                } else if let error = store.lastError, store.hasLoaded {
-                    ContentUnavailableView(
-                        "Session Unavailable",
-                        systemImage: "bolt.slash",
-                        description: Text(error)
-                    )
-                } else {
-                    ContentUnavailableView(
-                        "No Prompt Selected",
-                        systemImage: "doc.text",
-                        description: Text("Pick a prompt on the left, or create one with +.")
-                    )
-                }
-            case .drawings:
-                if let drawing = selectedDrawing {
-                    DrawingPane(drawing: drawing)
-                        // Resets the pane's ephemeral state (tool, in-flight
-                        // gesture) per selection; elements live on the Drawing
-                        // in the window-root store and survive.
-                        .id(drawing.id)
-                } else {
-                    ContentUnavailableView(
-                        "No Drawing Selected",
-                        systemImage: "scribble.variable",
-                        description: Text("Pick a drawing on the left, or create one with +.")
-                    )
-                }
-            }
-    }
-}
-
-// MARK: - Navigator
-
-private struct PromptNavigator: View {
-    let sessionName: String
-    let instanceName: String
-    let repositoryName: String?
-    let systemPath: String?
-    let changeSummary: ChangeSummary?
-    let prompts: [PromptStub]
-    @Binding var query: String
-    @Binding var selectedUuid: String?
-    @Binding var tab: SidebarTab
-    let drawings: [Drawing]
-    @Binding var selectedDrawingID: UUID?
-    let newLabel: String
-    let newDisabled: Bool
-    let onNew: () -> Void
-    let onSearchSession: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // One header row: the tab selector with its create/search actions
-            // beside it. No in-sidebar search field — the list is short enough
-            // to scan, and full-text search has its own screen.
-            HStack(spacing: 8) {
-                SegmentedPicker(
-                    options: SidebarTab.allCases,
-                    label: { Text($0.title) },
-                    selection: $tab,
-                    accessibilityLabel: "Sidebar section"
-                )
-                Spacer(minLength: 4)
-                Button(action: onNew) {
-                    Label(newLabel, systemImage: "plus")
-                        .labelStyle(.iconOnly)
-                }
-                .buttonStyle(.borderless)
-                .disabled(newDisabled)
-                .help(newLabel)
-                Button(action: onSearchSession) {
-                    Label("Search Session", systemImage: "magnifyingglass")
-                        .labelStyle(.iconOnly)
-                }
-                .buttonStyle(.borderless)
-                .help("Full-text search, scoped to this session")
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            switch tab {
-            case .prompts: promptList
-            case .drawings: drawingList
-            }
-        }
-    }
-
-    private var promptList: some View {
-        List(selection: $selectedUuid) {
-            Section {
-                if prompts.isEmpty {
-                    Text(query.isEmpty ? "No prompts yet. Create one with +." : "No matching prompts.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(prompts, id: \.uuid) { stub in
-                        PromptNavRow(stub: stub).tag(stub.uuid)
-                    }
-                }
-            } header: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(sessionName).font(.headline)
-                    // RepName · instance · system path → session, with path actions.
-                    // Path-open actions live in the toolbar's single "Open in…"
-                    // menu now — the header is identity only.
-                    HStack(spacing: 4) {
-                        Image(systemName: "internaldrive").font(.caption2)
-                        identityText
-                        Image(systemName: "arrow.right").font(.caption2)
-                        Text(sessionName)
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    // Session-level change summary (FILE_CHANGE events land here).
-                    if let summary = changeSummary, summary.changeCount > 0 {
-                        HStack(spacing: 4) {
-                            Image(systemName: "plusminus").font(.caption2)
-                            Text("\(summary.changeCount) changes · \(summary.distinctFiles) files · \(summary.totalLineSpan) lines")
-                        }
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    }
-                }
-                .textCase(nil)
-                .padding(.bottom, 4)
-            }
-        }
-        .listStyle(.sidebar)
-    }
-
-    private var drawingList: some View {
-        List(selection: $selectedDrawingID) {
-            Section {
-                if drawings.isEmpty {
-                    Text(query.isEmpty ? "No drawings yet. Create one with +." : "No matching drawings.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(drawings) { drawing in
-                        // No element-count subtitle here: reading `elements`
-                        // from the sidebar would subscribe the whole List to
-                        // every element write, undoing the observation
-                        // isolation the Drawing class was shaped for. The pane
-                        // header carries the count, where it's free.
-                        HStack(spacing: 8) {
-                            Image(systemName: "scribble.variable").foregroundStyle(.secondary)
-                            Text(drawing.displayTitle).font(.body).lineLimit(1)
-                        }
-                        .padding(.vertical, 2)
-                        .tag(drawing.id)   // UUID tag == UUID? binding — types must match
-                    }
-                }
-            } header: {
-                Text("Drawings")
-                    .textCase(nil)
-                    .padding(.bottom, 4)
-            }
-        }
-        .listStyle(.sidebar)
-    }
-
-    // RepName · instance name · system path — only the fields that are present.
-    @ViewBuilder
-    private var identityText: some View {
-        if let repo = repositoryName, !repo.isEmpty {
-            Text(repo)
-            Text("·").foregroundStyle(.tertiary)
-        }
-        Text(instanceName)
-        if let path = systemPath, !path.isEmpty {
-            Text("·").foregroundStyle(.tertiary)
-            Text(path)
-                .monospaced()
-                .lineLimit(1)
-                .truncationMode(.middle)
+        if let stub = selectedStub {
+            PromptEditorPane(
+                stub: stub,
+                scope: scope,
+                windowID: windowID,
+                history: editHistories.history(for: stub.uuid)
+            )
+            // Recreate the pane (fresh editor) per prompt; the undo
+            // controller is injected and outlives the recreation.
+            .id(stub.uuid)
+        } else if let error = store.lastError, store.hasLoaded {
+            ContentUnavailableView(
+                "Session Unavailable",
+                systemImage: "bolt.slash",
+                description: Text(error)
+            )
+            .navigationTitle(sessionDisplayName)
+        } else {
+            ContentUnavailableView(
+                "No Prompt Selected",
+                systemImage: "doc.text",
+                description: Text("Pick a prompt on the left, or create one with +.")
+            )
+            .navigationTitle(sessionDisplayName)
         }
     }
 }
-
-private struct PromptNavRow: View {
-    let stub: PromptStub
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "doc.text").foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(stub.name).font(.body).lineLimit(1)
-                Text("id \(stub.seq)").font(.caption2).foregroundStyle(.tertiary)
-            }
-            Spacer()
-            PromptStatusBadge(status: PromptStatus(rawValue: stub.status))
-        }
-        .padding(.vertical, 2)
-    }
-}
-
 
 // MARK: - Editor pane
 
@@ -512,6 +323,7 @@ private struct PromptEditorPane: View {
     @State private var archExpanded = false
     @State private var exploreExpanded = false
     @State private var reviewExpanded = false
+    @State private var dopeExpanded = false
     @Environment(WindowNav.self) private var nav
 
     init(stub: PromptStub, scope: SessionScope, windowID: SessionWindowID,
@@ -861,6 +673,17 @@ private struct PromptEditorPane: View {
                             ReviewPane(phase: phases.review) {
                                 await phases.requestFullReview()
                             }
+                        }
+                        // The prompt-level dope surface: the FIFTH phase card
+                        // (the editor's idiom for read-only subsystem sections
+                        // — its tab bar was deliberately removed). PROMPT
+                        // scope preferred, SESSION_BASE fallback; the pane's
+                        // resolvedVia chip shows which answered.
+                        phaseCard("Dope", systemImage: "cube.transparent",
+                                  expanded: $dopeExpanded,
+                                  accessory: { EmptyView() }) {
+                            DopePane(scope: scope, promptUuid: stub.uuid, scrollable: false)
+                                .frame(minHeight: 120)
                         }
                     }
                     .padding(20)

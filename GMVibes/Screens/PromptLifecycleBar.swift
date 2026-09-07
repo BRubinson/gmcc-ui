@@ -1,13 +1,14 @@
 import SwiftUI
 import GMCCDaemonKit
 
-/// The lifecycle affordance: a six-state rail plus one button per legal next
-/// state (`PromptStatus.allowedNext` — the implementing→done skip edge comes
-/// along free). Gates are PRE-COMPUTED from the phase store so a blocked
-/// transition renders disabled with the reason and issues no wire call; a
-/// daemon `INVALID_TRANSITION` is therefore a lost race — its reason string
-/// (preserved by `DaemonError.invalidTransition(reason:)`) surfaces verbatim
-/// and the phase store refreshes.
+/// The lifecycle affordance: a six-state rail plus exactly TWO controls —
+/// Mark Done (enabled only where `PromptStatus.allowedNext` contains `.done`,
+/// i.e. implementing/reviewing; disabled elsewhere with the edge reason) and
+/// Back to Draft (always disabled: the daemon has no backward status edge —
+/// a pending GM feature). The forward edges moved bot-side; `allowedNext`
+/// stays the authority, consulted only for `.done`. A daemon
+/// `INVALID_TRANSITION` is a lost race — its reason string (preserved by
+/// `DaemonError.invalidTransition(reason:)`) surfaces verbatim.
 struct PromptLifecycleBar: View {
     let stub: PromptStub
     let phases: PromptPhaseStore
@@ -17,9 +18,6 @@ struct PromptLifecycleBar: View {
 
     @State private var transitionError: String?
     @State private var inFlight = false
-    /// Confirmation for the one content-locking edge (draft → clarifying has
-    /// no backward edge — leaving draft is irreversible).
-    @State private var pendingLock: PromptStatus?
 
     private var status: PromptStatus? { PromptStatus(rawValue: stub.status) }
 
@@ -99,30 +97,16 @@ struct PromptLifecycleBar: View {
         }
         .padding(10)
         .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 10))
-        .confirmationDialog(
-            "Leave Draft?",
-            isPresented: Binding(
-                get: { pendingLock != nil },
-                set: { if !$0 { pendingLock = nil } }
-            ),
-            presenting: pendingLock
-        ) { next in
-            Button("Begin clarification", role: .destructive) {
-                pendingLock = nil
-                Task { await transition(to: next) }
-            }
-            Button("Cancel", role: .cancel) { pendingLock = nil }
-        } message: { _ in
-            Text("Backstory, Goal, and Detail become permanently read-only. This can't be undone.")
-        }
     }
 
     private var blockedHint: String? {
-        guard let status else { return nil }
-        for next in nextStates(from: status) {
-            if case .blocked(let reason, let fix) = gate(to: next) {
-                return "\(reason) — \(fix)."
-            }
+        // `.done` ONLY: Back to Draft is PERMANENTLY blocked, so consulting
+        // every button (the old rule) would render its message forever and
+        // mask the Done reason — the one explanation the user actually needs.
+        // A done prompt renders no buttons and needs no hint at all.
+        guard let status, status != .done else { return nil }
+        if case .blocked(let reason, let fix) = gate(to: .done) {
+            return "\(reason) — \(fix)."
         }
         return nil
     }
@@ -154,21 +138,22 @@ struct PromptLifecycleBar: View {
 
     // MARK: - Transitions
 
-    /// Deterministic button order: the forward edge first, the skip edge last.
+    /// Exactly two controls: Done (edge-gated) and Back to Draft (pending a
+    /// daemon-side backward edge — a GM feature request). Every other
+    /// forward edge moved bot-side; `allowedNext` is still the authority —
+    /// it is just consulted only for `.done` (in `gate(to:)`). A DONE prompt
+    /// is terminal: no buttons and no hint — rendering the gated pair there
+    /// would produce a self-contradicting "advance the prompt first" on a
+    /// prompt that already finished.
     private func nextStates(from status: PromptStatus) -> [PromptStatus] {
-        PromptStatus.allCases.filter { status.allowedNext.contains($0) }
+        status == .done ? [] : [.done, .draft]
     }
 
     @ViewBuilder
     private func transitionButton(to next: PromptStatus) -> some View {
         let gate = gate(to: next)
         Button {
-            if next == .clarifying {
-                // The one content-locking, irreversible edge — confirm.
-                pendingLock = next
-            } else {
-                Task { await transition(to: next) }
-            }
+            Task { await transition(to: next) }
         } label: {
             Label(buttonTitle(for: next), systemImage: buttonIcon(for: next))
         }
@@ -201,6 +186,28 @@ struct PromptLifecycleBar: View {
     /// .unknown only when reports were never requested.
     private func gate(to next: PromptStatus) -> Gate {
         switch (status, next) {
+        case (_, .done):
+            // The EDGE SET rules here, not a phase gate: the daemon couples
+            // no summary requirement to →done, but .done has exactly two
+            // inbound edges (implementing, reviewing) — server-enforced.
+            guard let status else { return .unknown }
+            guard status.allowedNext.contains(.done) else {
+                return .blocked(
+                    reason: "Done is reachable from Implementing or Reviewing (this prompt is \(status.rawValue))",
+                    fix: "advance the prompt with the bot first")
+            }
+            return .open
+        case (_, .draft):
+            // No backward edge exists daemon-side — filed as a GM feature
+            // request; the button ships visible-but-disabled so the intent
+            // reads as "coming", not "missing".
+            return .blocked(
+                reason: "Back to Draft isn't available yet",
+                fix: "pending a GM feature (the daemon has no backward edge)")
+        // The forward-edge gates below are UNREACHABLE while the bar is
+        // two-slot (nextStates never offers these edges) — kept because they
+        // document Store.setPromptStatus's gate coupling and return the day
+        // a forward affordance does.
         case (.clarifying, .architecting):
             switch phases.clarification {
             case .loaded:
@@ -273,13 +280,16 @@ struct PromptLifecycleBar: View {
         case .implementing: "Begin implementation"
         case .reviewing: "Begin review"
         case .done: "Mark done"
-        // Unreachable — allowedNext has no backward edge; exhaustiveness only.
-        case .draft: "Draft"
+        case .draft: "Back to Draft"
         }
     }
 
     private func buttonIcon(for next: PromptStatus) -> String {
-        next == .done ? "checkmark.circle" : "arrow.right.circle"
+        switch next {
+        case .done: "checkmark.circle"
+        case .draft: "arrow.uturn.backward.circle"
+        default: "arrow.right.circle"
+        }
     }
 
     private func transition(to next: PromptStatus) async {

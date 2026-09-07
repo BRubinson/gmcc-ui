@@ -99,8 +99,6 @@ struct LandingView: View {
                 .frame(maxWidth: 720)
 
                 InstanceSearchSection(
-                    groups: recents.projectGroups,
-                    onOpenInstance: { nav.go(.instance(instanceUuid: $0)) },
                     onBrowseInactive: { showInactiveSessions = true }
                 )
                 .frame(maxWidth: 720)
@@ -183,37 +181,45 @@ private struct RecentSessionCardView: View {
     }
 }
 
-// MARK: - Project-organized instance search
+// MARK: - Project-organized drill-down search
 
+/// The landing's bottom section: project rows, each listing ALL its instances
+/// alphabetically, each instance rendering the current + last 2 sessions as
+/// inline blocks. All three levels navigate (project → instance → session).
+/// The traversal is CatalogFilter (the app's one tree walk), derived into
+/// @State per the house rule.
 private struct InstanceSearchSection: View {
-    let groups: [ProjectInstanceGroup]
-    let onOpenInstance: (String) -> Void
+    @Environment(CatalogStore.self) private var catalog
+    @Environment(CheckoutWatcher.self) private var checkout
+    @Environment(WindowNav.self) private var nav
     let onBrowseInactive: () -> Void
 
     @State private var query = ""
+    @State private var filtered = FilteredCatalog()
+    @State private var activeByInstance: [String: String] = [:]
 
-    private var filtered: [ProjectInstanceGroup] {
-        let q = SearchQuery(query)
-        guard q.isActive else { return groups }
-        return groups.compactMap { group in
-            if q.matchesAny([group.projectName, group.repositoryName ?? ""]) { return group }
-            let hits = group.instances.filter {
-                q.matchesAny([$0.instanceName, $0.code, $0.systemPath ?? ""])
+    private func refilter() {
+        var active: [String: String] = [:]
+        for uuid in catalog.instancesByUuid.keys {
+            if let stub = checkout.currentSession(instanceUuid: uuid) {
+                active[uuid] = stub.uuid
             }
-            guard !hits.isEmpty else { return nil }
-            return ProjectInstanceGroup(
-                projectUuid: group.projectUuid,
-                projectName: group.projectName,
-                repositoryName: group.repositoryName,
-                instances: hits
-            )
         }
+        let next = CatalogFilter(
+            query: SearchQuery(query),
+            instanceOrder: .alphabetical,
+            sessionsPerInstance: 3,
+            activeSessionByInstance: active,
+            hoistActive: true
+        ).apply(to: catalog)
+        if activeByInstance != active { activeByInstance = active }
+        if filtered != next { filtered = next }
     }
 
     var body: some View {
         VStack(spacing: 14) {
             HStack(spacing: 12) {
-                CapsuleSearchField(prompt: "Search instances by project, name, or path", text: $query)
+                CapsuleSearchField(prompt: "Search projects, instances & sessions", text: $query)
                 Button(action: onBrowseInactive) {
                     Label("Inactive Sessions", systemImage: "archivebox")
                 }
@@ -221,76 +227,91 @@ private struct InstanceSearchSection: View {
                 .help("Browse non-active sessions across all instances")
             }
 
-            if filtered.isEmpty {
+            if filtered.projects.isEmpty {
                 ContentUnavailableView(
                     query.isEmpty ? "No instances" : "No matches",
                     systemImage: query.isEmpty ? "folder" : "magnifyingglass",
                     description: Text(query.isEmpty
                         ? "The daemon catalog has no instances yet."
-                        : "No instance matches “\(query)”.")
+                        : "Nothing matches “\(query)”.")
                 )
                 .frame(maxWidth: .infinity, minHeight: 140)
             } else {
                 VStack(spacing: 16) {
-                    ForEach(filtered) { group in
-                        ProjectGroupCard(group: group, onOpenInstance: onOpenInstance)
+                    ForEach(filtered.projects, id: \.uuid) { project in
+                        ProjectGroupCard(
+                            project: project,
+                            filtered: filtered,
+                            activeByInstance: activeByInstance,
+                            onOpenProject: { nav.go(.project(projectUuid: project.uuid)) },
+                            onOpenInstance: { nav.go(.instance(instanceUuid: $0)) },
+                            onOpenSession: openSession
+                        )
                     }
                 }
             }
         }
+        .onAppear { refilter() }
+        .onChange(of: query) { _, _ in refilter() }
+        // Every published catalog axis the snapshot folds must be observed —
+        // instancesByProject included, or an instance rename/create keeps the
+        // old name and alphabetical position until an unrelated event fires.
+        .onChange(of: catalog.projects) { _, _ in refilter() }
+        .onChange(of: catalog.instancesByProject) { _, _ in refilter() }
+        .onChange(of: catalog.sessionsByInstance) { _, _ in refilter() }
+        .onChange(of: checkout.stateByInstance) { _, _ in refilter() }
+    }
+
+    private func openSession(_ stub: SessionStub, _ instance: InstanceRow) {
+        // CatalogStore's factory: nil on a malformed uuid ⇒ inert row, never
+        // a fabricated identity.
+        guard let windowID = catalog.sessionWindowID(forSessionUuid: stub.uuid) else { return }
+        nav.go(.session(windowID))
     }
 }
 
 private struct ProjectGroupCard: View {
-    let group: ProjectInstanceGroup
+    let project: ProjectRow
+    let filtered: FilteredCatalog
+    let activeByInstance: [String: String]
+    let onOpenProject: () -> Void
     let onOpenInstance: (String) -> Void
+    let onOpenSession: (SessionStub, InstanceRow) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "folder")
-                    .foregroundStyle(.orange)
-                Text(group.projectName)
-                    .font(.headline)
-                if let repo = group.repositoryName {
-                    Text("·").foregroundStyle(.tertiary)
-                    Text(repo)
+            Button(action: onOpenProject) {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .foregroundStyle(.orange)
+                    Text(project.name)
+                        .font(.headline)
+                    if !project.gitRepoName.isEmpty {
+                        Text("·").foregroundStyle(.tertiary)
+                        Text(project.gitRepoName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                 }
-                Spacer()
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .help("Open the project page")
 
             VStack(spacing: 8) {
-                ForEach(group.instances) { instance in
-                    Button { onOpenInstance(instance.instanceUuid) } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "internaldrive")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(instance.instanceName)
-                                .font(.subheadline.weight(.medium))
-                            if let path = instance.systemPath {
-                                Text(path)
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            Spacer()
-                            Text("\(instance.sessionCount) session\(instance.sessionCount == 1 ? "" : "s")")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                            Image(systemName: "chevron.right")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .glassEffect(.regular, in: .rect(cornerRadius: 12))
+                ForEach(filtered.instances(of: project), id: \.uuid) { instance in
+                    InstanceSessionBlock(
+                        instance: instance,
+                        sessions: filtered.sessions(of: instance),
+                        totalSessions: filtered.totalSessions[instance.uuid] ?? 0,
+                        activeSessionUuid: activeByInstance[instance.uuid],
+                        onOpenInstance: { onOpenInstance(instance.uuid) },
+                        onOpenSession: { onOpenSession($0, instance) }
+                    )
                 }
             }
         }

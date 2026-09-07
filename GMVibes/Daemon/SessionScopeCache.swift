@@ -79,6 +79,7 @@ final class SessionScope {
     private weak var daemon: DaemonConnectionModel?
     private var savers: [String: PromptSaveActor] = [:]
     private var phaseStores: [String: PromptPhaseStore] = [:]
+    private var dopeStore: DopeStore?
 
     init(sessionUuid: String) {
         self.sessionUuid = sessionUuid
@@ -115,6 +116,17 @@ final class SessionScope {
         if let existing = phaseStores[promptUuid] { return existing }
         let fresh = PromptPhaseStore(promptUuid: promptUuid)
         phaseStores[promptUuid] = fresh
+        return fresh
+    }
+
+    /// ONE dope store per scope (not per prompt): DOPE_GET's SESSION_BASE
+    /// fallback means the session tab and a prompt's card often render the
+    /// SAME tree — every surface on this session shares this store, one
+    /// fetch per key, one event wake for all of them.
+    var dope: DopeStore {
+        if let existing = dopeStore { return existing }
+        let fresh = DopeStore(sessionUuid: sessionUuid)
+        dopeStore = fresh
         return fresh
     }
 }

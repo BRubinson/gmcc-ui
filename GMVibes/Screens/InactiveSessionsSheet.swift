@@ -31,19 +31,28 @@ struct InactiveSessionsSheet: View {
     }
 
     private func deriveRows() {
-        let q = SearchQuery(query)
+        // The tree walk is CatalogFilter (the app's one traversal); this just
+        // flattens its snapshot into presentable rows.
+        var checkedOut: [String: String] = [:]
+        for uuid in catalog.instancesByUuid.keys {
+            if let code = checkout.checkedOutCode(instanceUuid: uuid) {
+                checkedOut[uuid] = code
+            }
+        }
+        let filtered = CatalogFilter(
+            query: SearchQuery(query),
+            projectUuid: projectUuid,
+            instanceOrder: .recency,
+            checkedOutCodeByInstance: checkedOut,
+            excludeCheckedOut: true
+        ).apply(to: catalog)
+
         var out: [Row] = []
-        for project in catalog.projects {
-            if let projectUuid, project.uuid != projectUuid { continue }
-            for instance in catalog.instancesByProject[project.uuid] ?? [] {
+        for project in filtered.projects {
+            for instance in filtered.instances(of: project) {
                 guard let instanceUUID = UUID(uuidString: instance.uuid) else { continue }
-                let checkedOutCode = checkout.checkedOutCode(instanceUuid: instance.uuid)
-                for stub in catalog.sessionsByInstance[instance.uuid] ?? [] {
-                    guard stub.code != checkedOutCode,
-                          let sessionUUID = UUID(uuidString: stub.uuid) else { continue }
-                    if q.isActive, !q.matchesAny([stub.name, stub.code, instance.name, project.name]) {
-                        continue
-                    }
+                for stub in filtered.sessions(of: instance) {
+                    guard let sessionUUID = UUID(uuidString: stub.uuid) else { continue }
                     out.append(Row(
                         windowID: SessionWindowID(
                             sessionUUID: sessionUUID,

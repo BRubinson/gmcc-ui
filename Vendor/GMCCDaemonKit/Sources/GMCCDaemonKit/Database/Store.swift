@@ -24,6 +24,21 @@ public enum StoreError: Error, Sendable {
     /// (clarification_summary, architecture_summary). Maps onto the SAME wire
     /// code as the prompt-typed case — no new ErrorCode needed.
     case invalidEntityTransition(entity: String, from: String, to: String, reason: String?)
+    /// Dope whole-tree revision gate failure. Maps onto the SAME wire code as
+    /// versionConflict (the invalidEntityTransition precedent) so a pinned-Kit
+    /// GMVibes always decodes it.
+    case revisionConflict(scopeUuid: String, expected: Int64, actual: Int64)
+    /// The dope target EXISTS (session, and prompt when one was named) but no
+    /// dope scope was ever initialized for it. summaryAbsent is prompt-shaped
+    /// and cannot name a SESSION_BASE target, so dope gets its own case —
+    /// mapped onto the SAME wire code (the revisionConflict precedent), so
+    /// the four prompt-shaped call sites stay untouched.
+    case dopeScopeAbsent(sessionUuid: String, promptUuid: String?, code: String?)
+    /// The diagram owner EXISTS (project/instance/session/prompt row) but no
+    /// diagram was ever initialized for it (or none with the given code).
+    /// Same wire code as summaryAbsent (the dopeScopeAbsent precedent) so a
+    /// pinned-Kit GMVibes always decodes it; the remediation hint differs.
+    case diagramAbsent(ownerKind: String, ownerUuid: String, code: String?)
 
     public var errorPayload: ErrorPayload {
         switch self {
@@ -70,6 +85,28 @@ public enum StoreError: Error, Sendable {
             return ErrorPayload(
                 code: .invalidTransition,
                 message: "illegal \(entity) transition \(from) → \(to)\(suffix)")
+        case .revisionConflict(let scopeUuid, let expected, let actual):
+            return ErrorPayload(
+                code: .versionConflict,
+                message: "dope_scope \(scopeUuid): expected revision \(expected), actual \(actual)")
+        case .dopeScopeAbsent(let sessionUuid, let promptUuid, let code):
+            var target = "session \(sessionUuid)"
+            if let promptUuid { target += " / prompt \(promptUuid)" }
+            if let code { target += " code '\(code)'" }
+            let initHint = "gm dope init --session-uuid \(sessionUuid)"
+                + (promptUuid.map { " --prompt-uuid \($0)" } ?? "")
+                + " --code \(code ?? "<code>") --name <name>"
+            return ErrorPayload(
+                code: .summaryAbsent,
+                message: "\(target) has no dope scope yet — initialize one (\(initHint))")
+        case .diagramAbsent(let ownerKind, let ownerUuid, let code):
+            var target = "\(ownerKind) \(ownerUuid)"
+            if let code { target += " code '\(code)'" }
+            let initHint = "gm diagram init --\(ownerKind)-uuid \(ownerUuid)"
+                + " --code \(code ?? "<code>") --name <name>"
+            return ErrorPayload(
+                code: .summaryAbsent,
+                message: "\(target) has no diagram yet — initialize one (\(initHint))")
         }
     }
 }
@@ -278,6 +315,29 @@ public final class Store: @unchecked Sendable {
         let values: [(any DatabaseValueConvertible)?] =
             keys.map { set[$0] ?? nil } + [Store.isoNow(), uuid, expectedVersion]
         try db.execute(sql: sql, arguments: StatementArguments(values))
+        guard db.changesCount == 0 else { return }
+        guard let actual = try Int64.fetchOne(
+            db, sql: "SELECT version FROM \(table) WHERE uuid = ?", arguments: [uuid]
+        ) else {
+            throw StoreError.notFound(entity: table, key: uuid)
+        }
+        throw StoreError.versionConflict(entity: table, uuid: uuid, expected: expectedVersion, actual: actual)
+    }
+
+    /// Guarded delete — the DELETE twin of updateBase, with the same
+    /// zero-rows discrimination into NOT_FOUND vs VERSION_CONFLICT. Nothing
+    /// in the schema deleted a versioned row before dope's granular verbs.
+    /// FK CASCADEs report no count here; callers wanting cascade accounting
+    /// COUNT before deleting, in the same transaction.
+    func deleteBase(
+        _ db: Database,
+        table: String,
+        uuid: String,
+        expectedVersion: Int64
+    ) throws {
+        try db.execute(
+            sql: "DELETE FROM \(table) WHERE uuid = ? AND version = ?",
+            arguments: [uuid, expectedVersion])
         guard db.changesCount == 0 else { return }
         guard let actual = try Int64.fetchOne(
             db, sql: "SELECT version FROM \(table) WHERE uuid = ?", arguments: [uuid]

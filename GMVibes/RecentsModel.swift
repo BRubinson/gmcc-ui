@@ -19,34 +19,15 @@ struct RecentSessionCard: Identifiable, Equatable {
     var id: UUID { windowID.sessionUUID }
 }
 
-/// One instance row in the landing page's project-organized instance search.
-struct InstanceHit: Identifiable, Equatable {
-    let instanceUuid: String
-    let instanceName: String
-    let code: String
-    let systemPath: String?
-    let sessionCount: Int
-
-    var id: String { instanceUuid }
-}
-
-struct ProjectInstanceGroup: Identifiable, Equatable {
-    let projectUuid: String
-    let projectName: String
-    let repositoryName: String?
-    let instances: [InstanceHit]
-
-    var id: String { projectUuid }
-}
-
 /// Read-only derivation over the CatalogStore snapshot. Owns no persisted
 /// state and issues no I/O — the landing view refreshes the catalog
-/// (event-driven) and re-derives.
+/// (event-driven) and re-derives. Scoped to the Recent Sessions strip only:
+/// the landing's project/instance/session rows derive from CatalogFilter
+/// (the app's one tree traversal) instead.
 @Observable
 @MainActor
 final class RecentsModel {
     private(set) var recentSessions: [RecentSessionCard] = []
-    private(set) var projectGroups: [ProjectInstanceGroup] = []
 
     /// Cache parsed ISO-8601 timestamps so re-derivation doesn't re-parse the
     /// whole tree every event.
@@ -61,19 +42,10 @@ final class RecentsModel {
 
     func refresh(catalog: CatalogStore) {
         var sessions: [RecentSessionCard] = []
-        var groups: [ProjectInstanceGroup] = []
 
         for project in catalog.projects {
-            var hits: [InstanceHit] = []
             for instance in catalog.instancesByProject[project.uuid] ?? [] {
                 let stubs = catalog.sessionsByInstance[instance.uuid] ?? []
-                hits.append(InstanceHit(
-                    instanceUuid: instance.uuid,
-                    instanceName: instance.name,
-                    code: instance.code,
-                    systemPath: instance.absoluteFileSystemPath.isEmpty ? nil : instance.absoluteFileSystemPath,
-                    sessionCount: stubs.count
-                ))
                 guard let instanceUUID = UUID(uuidString: instance.uuid) else { continue }
                 for stub in stubs {
                     // A malformed uuid must skip the row, never mint a random
@@ -98,13 +70,6 @@ final class RecentsModel {
                     ))
                 }
             }
-            guard !hits.isEmpty else { continue }
-            groups.append(ProjectInstanceGroup(
-                projectUuid: project.uuid,
-                projectName: project.name,
-                repositoryName: project.gitRepoName.isEmpty ? nil : project.gitRepoName,
-                instances: hits
-            ))
         }
 
         // Code tiebreak: lastActivityAt is seconds-granularity so ties are
@@ -118,7 +83,6 @@ final class RecentsModel {
         }
         let topSessions = Array(sessions.prefix(sessionLimit))
         if recentSessions != topSessions { recentSessions = topSessions }
-        if projectGroups != groups { projectGroups = groups }
     }
 
     private func parse(_ raw: String) -> Date {

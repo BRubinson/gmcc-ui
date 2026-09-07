@@ -271,6 +271,54 @@ actor GMCCDaemonService {
         return try await perform { try $0.getKbiteFile(KbiteFileGetRequest(fileUuid: uuid)).file }
     }
 
+    // MARK: - Dope (wire v12, read + init only)
+
+    // Exactly four wrappers, deliberately: v0 is read-only-plus-init, and the
+    // narrow boundary is itself the enforcement against reaching for the
+    // vendored in-process Store+Dope/DopeRepoSandbox (the kit ships the
+    // daemon's server side inside this binary — bypassing the single-writer
+    // daemon is one import away and forbidden). The remaining unwrapped verbs
+    // are a four-line copy each when a prompt legitimately needs them.
+
+    /// Scope enumeration for the picker. With `promptUuid`: ONLY that prompt's
+    /// PROMPT scopes. Without it: the session's SESSION_BASE scopes. Never a
+    /// union — a caller wanting both (a prompt surface, whose DOPE_GET falls
+    /// back) asks twice. Zero scopes is an empty array, never SUMMARY_ABSENT.
+    func dopeList(sessionUuid: String, promptUuid: String? = nil) async throws -> DopeListResponse {
+        let req = DopeListRequest(
+            sessionUuid: Self.normalized(sessionUuid),
+            promptUuid: Self.normalized(promptUuid)
+        )
+        return try await perform { try $0.dopeList(req) }
+    }
+
+    func dopeGet(sessionUuid: String, promptUuid: String? = nil,
+                 code: String? = nil) async throws -> DopeGetResponse {
+        let req = DopeGetRequest(
+            sessionUuid: Self.normalized(sessionUuid),
+            promptUuid: Self.normalized(promptUuid),
+            code: code
+        )
+        return try await perform { try $0.dopeGet(req) }
+    }
+
+    func dopeInit(_ request: DopeInitRequest) async throws -> DopeScopeResponse {
+        let req = DopeInitRequest(
+            sessionUuid: Self.normalized(request.sessionUuid),
+            promptUuid: Self.normalized(request.promptUuid),
+            code: request.code,
+            name: request.name,
+            description: request.description,
+            cloneFromSessionBase: request.cloneFromSessionBase
+        )
+        return try await perform { try $0.dopeInit(req) }
+    }
+
+    func dopeReadRepo(scopeUuid: String) async throws -> DopeReadRepoResponse {
+        let uuid = Self.normalized(scopeUuid)
+        return try await perform { try $0.dopeReadRepo(DopeReadRepoRequest(scopeUuid: uuid)) }
+    }
+
     // MARK: - Helpers
 
     private nonisolated static func normalized(_ uuid: String?) -> String? {

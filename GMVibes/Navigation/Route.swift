@@ -5,13 +5,32 @@ import Foundation
 /// be a container root — so windows switch routes at the root rather than
 /// pushing destinations onto a `NavigationStack`.
 enum Route: Codable, Hashable {
+    /// The session view: prompt list + statuses and the session-level tabs.
     case session(SessionWindowID)
+    /// The prompt editor. Reuses SessionWindowID: `targetPromptUUID` is the
+    /// prompt identity (nil degrades to the newest-prompt rule). The route IS
+    /// the deep link — there is no side channel.
+    case sessionPrompt(SessionWindowID)
+    case project(projectUuid: String)
     case instance(instanceUuid: String)
     case projects
     case kbites
     case kbiteFile(URL)
     case promptMemories(PromptMemoriesWindowID)
     case search(SearchSeed)
+
+    /// The session both session routes scope to — the window lease key. The
+    /// SAME uuid for `.session` and `.sessionPrompt` on one session, so the
+    /// window-root lease task's id never changes across that hop and the
+    /// scope structurally cannot retire mid-navigation.
+    var sessionScopeUuid: String? {
+        switch self {
+        case .session(let windowID), .sessionPrompt(let windowID):
+            windowID.sessionUUID.wireString
+        default:
+            nil
+        }
+    }
 }
 
 /// Seed for the dedicated SEARCH screen. uuid-only scope (the session name is

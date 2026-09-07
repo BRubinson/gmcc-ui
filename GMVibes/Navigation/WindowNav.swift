@@ -17,11 +17,13 @@ final class WindowNav {
     var railOpen = false
     /// cmd+K action popup.
     var paletteOpen = false
-    /// One-shot prompt deep-link, set by `openSession` and consumed (cleared)
-    /// by the session screen. Lives OUTSIDE Route identity so a repeat
-    /// deep-link into the already-open session — where `go`'s equality guard
-    /// short-circuits and the screen is never recreated — still reaches the
-    /// live screen's selection.
+    /// One-shot retarget for the ONE case route identity cannot carry: a
+    /// repeat deep link to the prompt the route already names. `go`'s
+    /// equality guard short-circuits there (no re-init), and the user may
+    /// have selected a different prompt in-screen meanwhile — so the live
+    /// screen consumes this nudge instead. Set exclusively by `open(_:)` on
+    /// a route-equal hit; consuming clears it so the next identical hit
+    /// registers as a fresh change.
     var pendingPromptTarget: UUID?
 
     init(initial: Route? = nil) {
@@ -30,12 +32,17 @@ final class WindowNav {
 
     var canGoBack: Bool { !back.isEmpty }
 
-    /// Session navigation with deep-link delivery: the target rides both the
-    /// route payload (fresh screens seed from it in init) and the one-shot
-    /// pending channel (already-open screens retarget via onChange).
-    func openSession(_ windowID: SessionWindowID) {
-        pendingPromptTarget = windowID.targetPromptUUID
-        go(.session(windowID))
+    /// Session navigation: a prompt-targeted id opens the editor route
+    /// directly — the route IS the deep link (a different target is a
+    /// different route identity, so the screen re-seeds). No target ⇒ the
+    /// session view. The route-equal repeat rides `pendingPromptTarget`.
+    func open(_ windowID: SessionWindowID) {
+        let destination: Route = windowID.targetPromptUUID != nil
+            ? .sessionPrompt(windowID) : .session(windowID)
+        if destination == route, let target = windowID.targetPromptUUID {
+            pendingPromptTarget = target
+        }
+        go(destination)
     }
 
     func go(_ newRoute: Route) {

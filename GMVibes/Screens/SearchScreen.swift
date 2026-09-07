@@ -111,6 +111,6 @@ struct SearchScreen: View {
         guard let windowID = catalog.sessionWindowID(
             forSessionUuid: hit.sessionUuid, targetPromptUuid: hit.promptUuid
         ) else { return }
-        nav.openSession(windowID)   // route swap, no presenter to tear down
+        nav.open(windowID)   // route swap, no presenter to tear down
     }
 }

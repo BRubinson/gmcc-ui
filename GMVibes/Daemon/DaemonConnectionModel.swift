@@ -370,6 +370,28 @@ final class DaemonConnectionModel {
                 // prompt_uuid there.
                 hub.invalidateAllPrompts()
             }
+        case .diagramChange:
+            // No diagram surface in GMVibes yet — nothing subscribes. Payload
+            // carries session_uuid/prompt_uuid when the diagram is owned that
+            // deep; route there once a pane renders diagrams.
+            break
+        case .dopeChange:
+            // subject_uuid is the SCOPE uuid — a value no surface holds until
+            // AFTER a successful DOPE_GET, so it cannot be a routing key.
+            // session_uuid (always in recordDopeChange's payload) is what dope
+            // stores subscribe on; the scope uuid rides through the payload for
+            // the store to narrow via its own scope index.
+            if let session = payloadUuids(event)?.sessionUuid?.lowercased() {
+                hub.invalidate(.dope(session))
+            } else {
+                hub.invalidateAllDope()
+            }
+            // recordDopeChange also touches session.updated_at, so landing
+            // recency genuinely moved. `.changes` is the debounced (750ms)
+            // catalog-refresh path — NOT `.session`, which would storm
+            // SESSION_GET + PROMPT_LIST + prefetch on every node of a bot's
+            // tree build.
+            hub.invalidate(.changes)
         case .configSet:
             // A root moved daemon-side — the env's PATHS_GET snapshot is stale.
             hub.invalidate(.paths)

@@ -39,12 +39,11 @@ struct GMVibesWindow: View {
         // The shared app top bar, leading group — identical on every window.
         // Middle (title/subtitle) and trailing slot are declared per screen via
         // .navigationTitle/.navigationSubtitle and .toolbar(.primaryAction).
-        // The session route declares the group ITSELF, from its sidebar column
-        // (see GlobalToolbarGroup) — declaring it here too would duplicate it.
+        // On the session route its `.navigation` placement puts it RIGHT of
+        // the sidebar divider, next to the native collapse toggle — items in
+        // the sidebar section would clip away when the sidebar closes.
         .toolbar {
-            if !routeIsSession {
-                GlobalToolbarGroup(nav: nav, openWindow: openWindow)
-            }
+            GlobalToolbarGroup(nav: nav, openWindow: openWindow)
         }
         .overlay {
             if nav.paletteOpen { CommandPalette() }
@@ -62,62 +61,71 @@ struct GMVibesWindow: View {
                 await gmcc.loadFromDaemon()
             }
         }
+        // The SessionScopeCache lease, held by the WINDOW — above the
+        // `.id(nav.route)` boundary, same altitude/reasoning as DrawingsStore.
+        // Keyed on the session UUID (not the route), so hopping between
+        // `.session` and `.sessionPrompt` on one session never restarts this
+        // task: acquire/release never re-runs and the scope structurally
+        // cannot retire mid-navigation (the grace list goes back to being an
+        // optimization). `.task` is contractually balanced against view
+        // lifetime, so the pair can't be broken.
+        .task(id: nav.route?.sessionScopeUuid) {
+            guard let uuid = nav.route?.sessionScopeUuid else { return }
+            SessionScopeCache.shared.acquire(uuid)
+            defer { SessionScopeCache.shared.release(uuid) }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3600))
+            }
+        }
         .environment(nav)
         .environment(drawings)
     }
 
-    private var routeIsSession: Bool {
-        if case .session = nav.route { return true }
-        return false
-    }
-
     @ViewBuilder
     private var content: some View {
+        // Every arm mounts exactly ONE navigation container (ScreenScaffold,
+        // declared here or inside the screen) so titlebar geometry — and the
+        // `.navigation` placement of GlobalToolbarGroup — is identical on
+        // every route. The trailing slot is each screen's to fill via
+        // `.toolbar(placement: .primaryAction)`; empty renders empty.
         switch nav.route {
         case nil:
-            LandingView()
-                .todoTrailingSlot()
+            ScreenScaffold { LandingView() }
         case .session(let windowID):
-            SessionPromptEditorView(windowID: windowID)
+            SessionScreen(windowID: windowID)
+        case .sessionPrompt(let windowID):
+            SessionPromptScreen(windowID: windowID)
+        case .project(let projectUuid):
+            ProjectScreen(projectUuid: projectUuid)
         case .instance(let instanceUuid):
             InstanceScreen(instanceUuid: instanceUuid)
         case .projects:
-            ProjectsView()
-                .todoTrailingSlot()
+            ProjectsView()   // scaffold inside (owns the searchable binding)
         case .kbites:
-            KBitesScene()
-                .todoTrailingSlot()
+            KBitesScene()    // scaffold inside (owns the KBiteStore)
         case .kbiteFile(let url):
-            KBiteMarkdownWindowView(url: url)
-                .todoTrailingSlot()
+            ScreenScaffold { KBiteMarkdownWindowView(url: url) }
         case .promptMemories(let windowID):
-            PromptMemoriesWindow(windowID: windowID)
-                .todoTrailingSlot()
+            ScreenScaffold { PromptMemoriesWindow(windowID: windowID) }
         case .search(let seed):
-            SearchScreen(seed: seed)
-                .todoTrailingSlot()
+            ScreenScaffold { SearchScreen(seed: seed) }
         }
     }
 }
 
 /// The app-wide top-bar group: Back · daemon status pill · rail toggle · new
-/// window · ⌘K actions. One definition, two hosts — GMVibesWindow for plain
-/// routes, and the session screen's SIDEBAR column (so the group lands in the
-/// toolbar's leading section, level with the sidebar, instead of after the
-/// column divider). Dependencies are passed in rather than read from
-/// @Environment so the struct stays host-agnostic.
+/// window · ⌘K actions. Declared once, by GMVibesWindow, with `.navigation`
+/// placement: on plain routes that's the bar's leading edge; on the session
+/// route (NavigationSplitView) it pins the group RIGHT of the sidebar divider,
+/// beside the native collapse toggle — never in the sidebar section, whose
+/// items clip away when the sidebar closes. Dependencies are passed in rather
+/// than read from @Environment so the struct stays host-agnostic.
 struct GlobalToolbarGroup: ToolbarContent {
     let nav: WindowNav
     let openWindow: OpenWindowAction
-    /// `.navigation` on plain routes (leading edge of a bar with no columns).
-    /// The session sidebar passes `.automatic`: on macOS, DEFAULT-placement
-    /// items declared by the sidebar column render in the toolbar's sidebar
-    /// section, left of the divider — `.navigation` items are pinned right of
-    /// it no matter which column declares them.
-    var placement: ToolbarItemPlacement = .navigation
 
     var body: some ToolbarContent {
-        ToolbarItemGroup(placement: placement) {
+        ToolbarItemGroup(placement: .navigation) {
             if nav.canGoBack {
                 Button {
                     nav.goBack()
@@ -145,19 +153,6 @@ struct GlobalToolbarGroup: ToolbarContent {
                 Label("Actions", systemImage: "command")
             }
             .help("App-wide actions (⌘K)")
-        }
-    }
-}
-
-extension View {
-    /// The top bar's trailing slot when the active screen sets nothing.
-    func todoTrailingSlot() -> some View {
-        toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Text("TODO: Use later")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
         }
     }
 }

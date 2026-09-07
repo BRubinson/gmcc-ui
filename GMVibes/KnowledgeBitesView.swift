@@ -2,13 +2,13 @@ import SwiftUI
 import GMCCDaemonKit
 
 /// KBites route host. KnowledgeBitesView is a TabView with a toolbar but no
-/// navigation container of its own, so wrap it in a NavigationStack so the
+/// navigation container of its own, so wrap it in the ScreenScaffold as the
 /// title/toolbar host; the wrapper also owns the view-local KBiteStore.
 struct KBitesScene: View {
     @State private var store = KBiteStore()
 
     var body: some View {
-        NavigationStack {
+        ScreenScaffold {
             KnowledgeBitesView()
                 .environment(store)
         }

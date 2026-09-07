@@ -14,10 +14,9 @@ struct ProjectsView: View {
     @State private var expanded: Set<String> = []
 
     var body: some View {
-        // NavigationStack hosts only the title + searchable chrome (no path).
-        NavigationStack {
+        // ScreenScaffold hosts only the title + searchable chrome (no path).
+        ScreenScaffold(title: "Projects") {
             ProjectTreeView(query: $query, expanded: $expanded)
-                .navigationTitle("Projects")
                 .searchable(text: $query, placement: .toolbar,
                             prompt: "Search projects, instances & sessions")
         }
@@ -32,16 +31,20 @@ private struct ProjectTreeView: View {
 
     @Binding var query: String
     @Binding var expanded: Set<String>
+    // Derived in @State (house rule): typing a character rescans the tree
+    // once, not once per body pass. The traversal itself is CatalogFilter —
+    // the app's ONE tree walk.
+    @State private var filtered = FilteredCatalog()
 
     var body: some View {
         List {
-            ForEach(visibleProjects, id: \.uuid) { project in
+            ForEach(filtered.projects, id: \.uuid) { project in
                 ProjectFolderRow(project: project,
-                                 query: query,
-                                 expanded: $expanded,
-                                 forceExpanded: forceExpanded)
+                                 filtered: filtered,
+                                 searching: !query.isEmpty,
+                                 expanded: $expanded)
             }
-            if visibleProjects.isEmpty {
+            if filtered.projects.isEmpty {
                 emptyRow
             }
         }
@@ -52,48 +55,30 @@ private struct ProjectTreeView: View {
         .task(id: daemon.generation) {
             let stream = daemon.hub.stream(for: .topology)
             await catalog.refresh()
+            refilter()
             for await _ in stream {
                 await catalog.refresh()
+                refilter()
             }
         }
+        .onChange(of: query) { _, _ in refilter() }
+        // The derived-@State conversion loses the free re-derivation the old
+        // computed properties got from body reads — EVERY published catalog
+        // axis this snapshot folds must be observed, or a rename sticks
+        // until an unrelated event.
+        .onChange(of: catalog.projects) { _, _ in refilter() }
+        .onChange(of: catalog.instancesByProject) { _, _ in refilter() }
+        .onChange(of: catalog.sessionsByInstance) { _, _ in refilter() }
     }
 
-    private var projects: [ProjectRow] { catalog.projects }
-
-    // View-layer filter. With an active query, keep a project only if it matches
-    // itself or has any matching instance/session (descendant match).
-    private var visibleProjects: [ProjectRow] {
-        let q = SearchQuery(query)
-        guard q.isActive else { return projects }
-        return projects.filter { projectHasMatch($0, q) }
-    }
-
-    // Every ancestor uuid of any match, so matching folders auto-open. A matching
-    // instance opens its project; a matching session opens its instance + project.
-    private var forceExpanded: Set<String> {
-        let q = SearchQuery(query)
-        guard q.isActive else { return [] }
-        var out: Set<String> = []
-        for project in projects {
-            var projectShouldOpen = false
-            for instance in catalog.instances(of: project) {
-                let sessionMatch = catalog.sessions(of: instance).contains { $0.matches(q) }
-                if instance.matches(q) || sessionMatch { projectShouldOpen = true }
-                if sessionMatch { out.insert(instance.uuid) }
-            }
-            if projectShouldOpen { out.insert(project.uuid) }
-        }
-        return out
-    }
-
-    // A project is relevant when it matches, or any instance matches, or any
-    // session under any instance matches.
-    private func projectHasMatch(_ project: ProjectRow, _ q: SearchQuery) -> Bool {
-        if project.matches(q) { return true }
-        return catalog.instances(of: project).contains { instance in
-            if instance.matches(q) { return true }
-            return catalog.sessions(of: instance).contains { $0.matches(q) }
-        }
+    private func refilter() {
+        // This browser keeps the catalog's recency order (the drill-down
+        // pages are the alphabetical surfaces) and SHOWS instance-less
+        // projects (the tree renders a "No instances." row for them).
+        let next = CatalogFilter(query: SearchQuery(query), instanceOrder: .recency,
+                                 includeEmptyProjects: true)
+            .apply(to: catalog)
+        if filtered != next { filtered = next }
     }
 
     private var emptyRow: some View {
@@ -116,16 +101,16 @@ private struct ProjectTreeView: View {
 
 private struct ProjectFolderRow: View {
     let project: ProjectRow
-    let query: String
+    let filtered: FilteredCatalog
+    let searching: Bool
     @Binding var expanded: Set<String>
-    let forceExpanded: Set<String>
 
     var body: some View {
         DisclosureGroup(isExpanded: expansionBinding) {
             InstanceLevel(project: project,
-                          query: query,
-                          expanded: $expanded,
-                          forceExpanded: forceExpanded)
+                          filtered: filtered,
+                          searching: searching,
+                          expanded: $expanded)
         } label: {
             FolderLabel(name: project.name, subtitle: project.code,
                         systemImage: "folder")
@@ -134,7 +119,7 @@ private struct ProjectFolderRow: View {
 
     private var expansionBinding: Binding<Bool> {
         Binding(
-            get: { expanded.contains(project.uuid) || forceExpanded.contains(project.uuid) },
+            get: { expanded.contains(project.uuid) || filtered.expandedAncestors.contains(project.uuid) },
             set: { open in
                 if open { expanded.insert(project.uuid) } else { expanded.remove(project.uuid) }
             }
@@ -142,40 +127,26 @@ private struct ProjectFolderRow: View {
     }
 }
 
-// Instances of a project — read straight from the catalog snapshot.
+// Instances of a project — read straight from the filtered snapshot.
 private struct InstanceLevel: View {
-    @Environment(CatalogStore.self) private var catalog
     let project: ProjectRow
-    let query: String
+    let filtered: FilteredCatalog
+    let searching: Bool
     @Binding var expanded: Set<String>
-    let forceExpanded: Set<String>
 
     var body: some View {
-        let instances = visibleInstances(catalog.instances(of: project))
+        let instances = filtered.instances(of: project)
         if instances.isEmpty {
-            Text(query.isEmpty ? "No instances." : "No matching instances.")
+            Text(searching ? "No matching instances." : "No instances.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else {
             ForEach(instances, id: \.uuid) { instance in
                 InstanceFolderRow(instance: instance,
-                                  project: project,
-                                  query: query,
-                                  expanded: $expanded,
-                                  forceExpanded: forceExpanded)
+                                  filtered: filtered,
+                                  searching: searching,
+                                  expanded: $expanded)
             }
-        }
-    }
-
-    private func visibleInstances(_ instances: [InstanceRow]) -> [InstanceRow] {
-        let q = SearchQuery(query)
-        guard q.isActive else { return instances }
-        // The whole project matched ⇒ show all its instances; otherwise keep
-        // instances that match or have a matching session.
-        if project.matches(q) { return instances }
-        return instances.filter { instance in
-            if instance.matches(q) { return true }
-            return catalog.sessions(of: instance).contains { $0.matches(q) }
         }
     }
 }
@@ -184,16 +155,15 @@ private struct InstanceLevel: View {
 
 private struct InstanceFolderRow: View {
     let instance: InstanceRow
-    let project: ProjectRow
-    let query: String
+    let filtered: FilteredCatalog
+    let searching: Bool
     @Binding var expanded: Set<String>
-    let forceExpanded: Set<String>
 
     var body: some View {
         DisclosureGroup(isExpanded: expansionBinding) {
             SessionLevel(instance: instance,
-                         project: project,
-                         query: query)
+                         filtered: filtered,
+                         searching: searching)
         } label: {
             FolderLabel(name: instance.name, subtitle: instance.code,
                         systemImage: "folder")
@@ -202,7 +172,7 @@ private struct InstanceFolderRow: View {
 
     private var expansionBinding: Binding<Bool> {
         Binding(
-            get: { expanded.contains(instance.uuid) || forceExpanded.contains(instance.uuid) },
+            get: { expanded.contains(instance.uuid) || filtered.expandedAncestors.contains(instance.uuid) },
             set: { open in
                 if open { expanded.insert(instance.uuid) } else { expanded.remove(instance.uuid) }
             }
@@ -210,17 +180,16 @@ private struct InstanceFolderRow: View {
     }
 }
 
-// Sessions of an instance — read straight from the catalog snapshot.
+// Sessions of an instance — read straight from the filtered snapshot.
 private struct SessionLevel: View {
-    @Environment(CatalogStore.self) private var catalog
     let instance: InstanceRow
-    let project: ProjectRow
-    let query: String
+    let filtered: FilteredCatalog
+    let searching: Bool
 
     var body: some View {
-        let sessions = visibleSessions(catalog.sessions(of: instance))
+        let sessions = filtered.sessions(of: instance)
         if sessions.isEmpty {
-            Text(query.isEmpty ? "No sessions." : "No matching sessions.")
+            Text(searching ? "No matching sessions." : "No sessions.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else {
@@ -229,35 +198,23 @@ private struct SessionLevel: View {
             }
         }
     }
-
-    private func visibleSessions(_ sessions: [SessionStub]) -> [SessionStub] {
-        let q = SearchQuery(query)
-        guard q.isActive else { return sessions }
-        // If an ancestor (project/instance) matched, the whole subtree is relevant;
-        // otherwise keep only sessions that match.
-        if project.matches(q) || instance.matches(q) { return sessions }
-        return sessions.filter { $0.matches(q) }
-    }
 }
 
 // MARK: - Session leaf (level 2)
 
 private struct SessionLeafRow: View {
     @Environment(WindowNav.self) private var nav
+    @Environment(CatalogStore.self) private var catalog
     let session: SessionStub
     let instance: InstanceRow
 
     var body: some View {
         Button {
-            // Navigate this window to the session. A malformed uuid disables
-            // the row rather than fabricating an identity for a dead screen.
-            guard let sessionUUID = UUID(uuidString: session.uuid),
-                  let instanceUUID = UUID(uuidString: instance.uuid) else { return }
-            nav.go(.session(SessionWindowID(
-                sessionUUID: sessionUUID,
-                instanceUUID: instanceUUID,
-                sessionName: session.name
-            )))
+            // Navigate this window to the session. The factory returns nil on
+            // a malformed uuid — the row goes inert rather than fabricating
+            // an identity for a dead screen (CatalogStore's contract).
+            guard let windowID = catalog.sessionWindowID(forSessionUuid: session.uuid) else { return }
+            nav.go(.session(windowID))
         } label: {
             Label {
                 VStack(alignment: .leading, spacing: 2) {

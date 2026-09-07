@@ -86,7 +86,7 @@ struct CommandPalette: View {
         // Dismiss FIRST — nav.go flips the window's route .id, and mutating
         // both in one synchronous pass tears this overlay down mid-update.
         nav.paletteOpen = false
-        Task { @MainActor in nav.openSession(windowID) }
+        Task { @MainActor in nav.open(windowID) }
     }
 
     private func openSelectedOrFirst() {

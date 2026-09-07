@@ -315,3 +315,75 @@ extension DaemonClient {
         try request(type: .configSet, payload: req, responseType: ConfigSetResponse.self)
     }
 }
+
+// MARK: - Dope (v11)
+
+extension DaemonClient {
+    public func dopeInit(_ req: DopeInitRequest) throws -> DopeScopeResponse {
+        try request(type: .dopeInit, payload: req, responseType: DopeScopeResponse.self)
+    }
+
+    public func dopeList(_ req: DopeListRequest) throws -> DopeListResponse {
+        try request(type: .dopeList, payload: req, responseType: DopeListResponse.self)
+    }
+
+    public func dopeGet(_ req: DopeGetRequest) throws -> DopeGetResponse {
+        try request(type: .dopeGet, payload: req, responseType: DopeGetResponse.self)
+    }
+
+    public func dopeNodeAdd(_ req: DopeNodeAddRequest) throws -> DopeNodeResponse {
+        try request(type: .dopeNodeAdd, payload: req, responseType: DopeNodeResponse.self)
+    }
+
+    public func dopeNodeUpdate(_ req: DopeNodeUpdateRequest) throws -> DopeNodeResponse {
+        try request(type: .dopeNodeUpdate, payload: req, responseType: DopeNodeResponse.self)
+    }
+
+    public func dopeNodeDelete(_ req: DopeNodeDeleteRequest) throws -> DopeNodeDeleteResponse {
+        try request(type: .dopeNodeDelete, payload: req, responseType: DopeNodeDeleteResponse.self)
+    }
+
+    public func dopeReadRepo(_ req: DopeReadRepoRequest) throws -> DopeReadRepoResponse {
+        try request(type: .dopeReadRepo, payload: req, responseType: DopeReadRepoResponse.self)
+    }
+
+    public func dopeWriteRepo(_ req: DopeWriteRepoRequest) throws -> DopeWriteRepoResponse {
+        try request(type: .dopeWriteRepo, payload: req, responseType: DopeWriteRepoResponse.self)
+    }
+
+    public func dopeIngest(_ req: DopeIngestRequest) throws -> DopeIngestResponse {
+        try request(type: .dopeIngest, payload: req, responseType: DopeIngestResponse.self)
+    }
+}
+
+// MARK: - Diagram (v15)
+
+extension DaemonClient {
+    public func diagramInit(_ req: DiagramInitRequest) throws -> DiagramResponse {
+        try request(type: .diagramInit, payload: req, responseType: DiagramResponse.self)
+    }
+
+    public func diagramList(_ req: DiagramListRequest) throws -> DiagramListResponse {
+        try request(type: .diagramList, payload: req, responseType: DiagramListResponse.self)
+    }
+
+    public func diagramGet(_ req: DiagramGetRequest) throws -> DiagramGetResponse {
+        try request(type: .diagramGet, payload: req, responseType: DiagramGetResponse.self)
+    }
+
+    public func diagramNodeAdd(_ req: DiagramNodeAddRequest) throws -> DiagramNodeResponse {
+        try request(type: .diagramNodeAdd, payload: req, responseType: DiagramNodeResponse.self)
+    }
+
+    public func diagramNodeUpdate(_ req: DiagramNodeUpdateRequest) throws -> DiagramNodeResponse {
+        try request(type: .diagramNodeUpdate, payload: req, responseType: DiagramNodeResponse.self)
+    }
+
+    public func diagramNodeDelete(_ req: DiagramNodeDeleteRequest) throws -> DiagramNodeDeleteResponse {
+        try request(type: .diagramNodeDelete, payload: req, responseType: DiagramNodeDeleteResponse.self)
+    }
+
+    public func diagramBatchApply(_ req: DiagramBatchApplyRequest) throws -> DiagramBatchApplyResponse {
+        try request(type: .diagramBatchApply, payload: req, responseType: DiagramBatchApplyResponse.self)
+    }
+}

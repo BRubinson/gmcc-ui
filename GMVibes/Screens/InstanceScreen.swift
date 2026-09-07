@@ -1,11 +1,14 @@
 import SwiftUI
 import GMCCDaemonKit
 
-/// The instance page. Loads the checked-out ("active") session by default.
-/// If the checked-out branch changes while a session is open, the page flags
-/// it with a yellow banner but NEVER auto-switches — a button loads into the
-/// new active session. When no session row matches the checked-out branch,
-/// an explicit empty state offers the inactive-sessions browser.
+/// The instance page: ALL of one instance's sessions, current-first. The
+/// active (checked-out) session is resolved DAEMON-side
+/// (INSTANCE_CURRENT_SESSION via CheckoutWatcher) and hoisted with the
+/// outline + dot; a head-state strip explains branch / detached /
+/// unavailable / unresolved. Nothing here auto-navigates — with no embedded
+/// editor, "never auto-switch" is true by construction (the old
+/// auto-load/drift machinery is gone; drift is simply the strip re-rendering
+/// around a different active row).
 struct InstanceScreen: View {
     let instanceUuid: String
 
@@ -14,9 +17,8 @@ struct InstanceScreen: View {
     @Environment(CheckoutWatcher.self) private var checkout
     @Environment(WindowNav.self) private var nav
 
-    @State private var loadedWindowID: SessionWindowID?
-    @State private var didAutoLoad = false
     @State private var showInactive = false
+    @State private var filtered = FilteredCatalog()
 
     private var instance: InstanceRow? { catalog.instancesByUuid[instanceUuid] }
 
@@ -26,44 +28,35 @@ struct InstanceScreen: View {
         checkout.currentSession(instanceUuid: instanceUuid)
     }
 
-    /// The loaded session is no longer the checked-out one.
-    private var drifted: Bool {
-        guard let loaded = loadedWindowID else { return false }
-        return activeStub?.uuid != loaded.sessionUUID.wireString
+    private var sessions: [SessionStub] {
+        instance.map { filtered.sessions(of: $0) } ?? []
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // In-page identity strip: the hosted session screen declares its
-            // own navigationTitle/subtitle, which would shadow any declared
-            // here — so the instance identity lives in the page, not the bar.
-            identityStrip
-            if drifted {
-                driftBanner
-            }
-            if let loaded = loadedWindowID {
-                SessionPromptEditorView(windowID: loaded)
-                    .id(loaded)
-            } else {
-                emptyState
-                    .todoTrailingSlot()
-                    .navigationTitle(instance?.name ?? "Instance")
+        ScreenScaffold(title: instance?.name ?? "Instance") {
+            VStack(spacing: 0) {
+                identityStrip
+                headStateStrip
+                sessionList
             }
         }
         // House idiom: catalog stays fresh on topology invalidations.
         .task(id: daemon.generation) {
             let stream = daemon.hub.stream(for: .topology)
             if !catalog.hasLoaded { await catalog.refresh() }
-            ensureWatchingAndAutoLoad()
+            checkout.ensureWatching(instanceUuid: instanceUuid, generation: daemon.generation)
+            refilter()
             for await _ in stream {
                 await catalog.refresh()
-                ensureWatchingAndAutoLoad()
+                checkout.ensureWatching(instanceUuid: instanceUuid, generation: daemon.generation)
+                refilter()
             }
         }
-        // Auto-load once when checkout state arrives after the catalog.
-        .onChange(of: checkout.stateByInstance[instanceUuid]) { _, _ in
-            ensureWatchingAndAutoLoad()
-        }
+        // The active hoist moves when the checked-out branch changes — the
+        // strip and ordering follow; nothing navigates.
+        .onChange(of: checkout.stateByInstance[instanceUuid]) { _, _ in refilter() }
+        .onChange(of: catalog.sessionsByInstance) { _, _ in refilter() }
+        .onChange(of: catalog.instancesByProject) { _, _ in refilter() }
         .sheet(isPresented: $showInactive) {
             // Project-level scope (per the brief): all of THIS project's
             // instances, not just this one.
@@ -71,23 +64,18 @@ struct InstanceScreen: View {
         }
     }
 
-    private func ensureWatchingAndAutoLoad() {
-        checkout.ensureWatching(instanceUuid: instanceUuid, generation: daemon.generation)
-        // Default-load the active session ONCE; later drift only flags.
-        if !didAutoLoad, loadedWindowID == nil, let stub = activeStub {
-            loadActive(stub)
-            didAutoLoad = true
-        }
-    }
-
-    private func loadActive(_ stub: SessionStub) {
-        guard let sessionUUID = UUID(uuidString: stub.uuid),
-              let instanceUUID = UUID(uuidString: instanceUuid) else { return }
-        loadedWindowID = SessionWindowID(
-            sessionUUID: sessionUUID,
-            instanceUUID: instanceUUID,
-            sessionName: stub.name
-        )
+    private func refilter() {
+        var active: [String: String] = [:]
+        if let stub = activeStub { active[instanceUuid] = stub.uuid }
+        let next = CatalogFilter(
+            query: SearchQuery(""),
+            instanceUuid: instanceUuid,
+            instanceOrder: .recency,
+            sessionsPerInstance: nil,
+            activeSessionByInstance: active,
+            hoistActive: true
+        ).apply(to: catalog)
+        if filtered != next { filtered = next }
     }
 
     private var identityStrip: some View {
@@ -106,56 +94,119 @@ struct InstanceScreen: View {
                     .truncationMode(.middle)
             }
             Spacer()
+            Button {
+                showInactive = true
+            } label: {
+                Label("Inactive Sessions", systemImage: "archivebox")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .help("Browse non-active sessions across this project")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 5)
         .background(.quaternary.opacity(0.35))
     }
 
-    private var driftBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.yellow)
-            Text(activeStub.map { "The active session changed to “\($0.name)”." }
-                ?? "The checked-out branch no longer matches an open session.")
-                .font(.callout)
-            Spacer()
-            if let stub = activeStub {
-                Button {
-                    loadActive(stub)
-                } label: {
-                    Label("Load active session", systemImage: "arrow.uturn.right")
-                }
-                .buttonStyle(.glass)
+    /// Head-state surface: which session is checked out, or WHY none is —
+    /// the four distinctions (branch without a session row / detached HEAD /
+    /// unreadable path / unresolved) survive the inversion as a strip above
+    /// the list rather than a full-page empty state.
+    @ViewBuilder
+    private var headStateStrip: some View {
+        if let stub = activeStub {
+            HStack(spacing: 8) {
+                Circle().fill(.green).frame(width: 8, height: 8)
+                Text("Checked out: “\(stub.name)”")
+                    .font(.callout)
+                Spacer()
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(.green.opacity(0.08))
+        } else {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.branch")
+                    .foregroundStyle(.secondary)
+                Text(noActiveMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(.yellow.opacity(0.10))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(.yellow.opacity(0.12))
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.largeTitle)
-                .foregroundStyle(.secondary)
-            Text("No active session")
-                .font(.title2.weight(.semibold))
-            Text(noActiveMessage)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 460)
-            Button {
-                showInactive = true
-            } label: {
-                Label("Browse inactive sessions", systemImage: "archivebox")
+    @ViewBuilder
+    private var sessionList: some View {
+        if sessions.isEmpty {
+            ContentUnavailableView(
+                "No Sessions",
+                systemImage: "arrow.triangle.branch",
+                description: Text("This instance has no sessions in the GMCC database yet.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Backdrop())
+        } else {
+            ScrollView {
+                VStack(spacing: 8) {
+                    ForEach(sessions, id: \.uuid) { stub in
+                        sessionRow(stub)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: 720)
+                .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.glass)
+            .background(Backdrop())
         }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Backdrop())
+    }
+
+    private func sessionRow(_ stub: SessionStub) -> some View {
+        let active = stub.uuid == activeStub?.uuid
+        return Button {
+            openSession(stub)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(stub.name)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                    Text(stub.code)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Text(CatalogDates.relative(stub.lastActivityAt))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                // Hidden (not removed) so state changes never shift layout.
+                Circle()
+                    .fill(.green)
+                    .frame(width: 8, height: 8)
+                    .opacity(active ? 1 : 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular, in: .rect(cornerRadius: 12))
+        .stateBorder(.green, active: active, cornerRadius: 12)
+        .help(active ? "Checked out on this instance's repo" : stub.name)
+    }
+
+    private func openSession(_ stub: SessionStub) {
+        // CatalogStore's factory: nil on a malformed uuid ⇒ inert row, never
+        // a fabricated identity.
+        guard let windowID = catalog.sessionWindowID(forSessionUuid: stub.uuid) else { return }
+        nav.go(.session(windowID))
     }
 
     private var noActiveMessage: String {
